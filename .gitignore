@@ -1,1 +1,13 @@
 /target
+/.dev-data
+# The real database lives in the platform data directory (see src/paths.rs).
+# This only appears if ROME_DATA_DIR is pointed at the repository root.
+/rome.db
+
+# Frames written by `just shots`. Output, not source: they are made to be looked
+# at and would be stale in the repository the moment the design moved.
+/shots
+
+# `runtime/fake-host.py` is run by the plugin tests; this is Python's own cache
+# of it, and it is a build artifact with a machine-specific path inside.
+__pycache__/

@@ -2,6 +2,107 @@
 name = "rome"
 version = "0.1.0"
 edition = "2024"
+default-run = "rome"
 
 [dependencies]
 gpui-kit = "0.7.3"
+# `regular` comes from the crate's default features and `duotone` is added on
+# top. A weight that is not embedded renders nothing at all, so both are needed.
+gpui-kit-phosphor = { version = "0.1", features = ["duotone"] }
+directories = "6"
+# `serde` is what makes `#[column(type = text)]` on a JSON field compile; the
+# compatibility impls for `serde_json::Value` are gated behind it, and without
+# the feature the error is about the column storage rather than the feature.
+toasty = { version = "0.11", default-features = false, features = ["sqlite", "migration", "serde"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+# Only used by the `migrate` binary; see src/bin/migrate.rs.
+toasty-cli = "0.11"
+anyhow = "1"
+# The worker thread talks to the UI over channels. `flume` rather than
+# `std::sync::mpsc` because the UI's end is received inside an async task, and
+# only `flume` offers a receiver that can be awaited. Pinned to the same version
+# gpui already depends on, so there is one copy in the tree.
+flume = "0.12"
+
+# Plugin settings and source parameters are stored as opaque JSON, since only
+# the plugin that wrote them knows their shape.
+serde_json = "1"
+# A plugin's `fetch` is executed by the host, so the HTTP transport lives here
+# rather than in the plugin runtime. Features are chosen, not defaulted:
+#   * default features are off because the default set is `default-tls` +
+#     `charset` + `http2` + `system-proxy`, and `default-tls` is native-tls,
+#     which links OpenSSL. `rustls-tls` keeps TLS in-process (rustls with the
+#     ring provider and bundled webpki roots), so there is nothing to link on
+#     any platform. reqwest 0.13 renamed this feature to `rustls` and made
+#     aws-lc-rs the default provider, which wants a C toolchain — 0.12's
+#     ring-based `rustls-tls` is the deliberate choice.
+#   * `http2` because most sites now speak it and the alternative is a silent
+#     downgrade.
+#   * `gzip` and `brotli` because nearly every site serves a compressed body,
+#     and without transparent decompression the plugin would be handed
+#     compressed bytes as if they were text.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "gzip", "brotli"] }
+# Reading the body of a request GPUI hands the image client. Already in the
+# tree through gpui, which uses it for its executor.
+futures = "0.3"
+# Set-Cookie parsing only — the jar's policy is ours (see src/http.rs). This is
+# the fiddly part worth borrowing: attribute casing, quoted values, negative
+# Max-Age, and four date formats.
+cookie = "0.18"
+# Decodes response bodies whose charset is not UTF-8, which reqwest already
+# depends on when `charset` is on, so this adds no new transitive crate.
+encoding_rs = "0.8"
+
+# Entries carry a publication time as seconds since the epoch, and the list has
+# to say when that was. Already in the tree through `time`, so this costs
+# nothing to build; the alternative is hand-rolling civil-date arithmetic to
+# turn a timestamp into a day.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# The login window. A plugin cannot be asked to reproduce a site's login page —
+# 2FA, captcha and whatever the provider invented this year — so the one place
+# Rome hands a page to a real engine is a separate native window whose only job
+# is to let the user sign in. It is a WKWebView attached to a GPUI window rather
+# than a second event loop (`build_as_child`), because GPUI already owns the
+# main thread and two event loops cannot.
+#
+# Default features are off: they include `x11`, which pulls GTK and tao's X11
+# backend. `os-webview` is the platform webview itself, which on macOS is
+# WebKit and needs no system libraries beyond the OS.
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+
+[dev-dependencies]
+# `test-support` is what compiles GPUI's headless contexts in — `HeadlessAppContext`,
+# `Window::render_to_image`, and the element-observation API — none of which exist
+# without it. It is a dev-dependency rather than a feature of the application so
+# that a normal `cargo build` does not carry them: edition 2024 resolves with
+# resolver 3, which does not unify a dev-dependency's features into the build
+# that ships. See `tests/render.rs`.
+#
+# The two crates are named directly rather than reached through `gpui-kit`'s own
+# `test-support` feature, which would be the obvious way. That feature also names
+# `gpui-fast?/test-support`, and cargo resolves a weak dependency to read the
+# feature off it even though it never activates it — which drags `gpui-fast`'s
+# whole tree into the lockfile to no purpose, and `gpui-fast-macos 0.1.7` wants
+# `cocoa =0.26.0` against the `cocoa 0.26.1` the rest of the graph is pinned to.
+# The resolution fails there, several layers away from anything Rome uses. These
+# two features are the ones actually needed and neither has a weak dependency in
+# it: `gpui-pre` is where `HeadlessAppContext` and `render_to_image` live, and
+# `gpui-pre-platform` is where `current_headless_renderer` is gated.
+#
+# `gpui-kit` re-exports both crates, so the test still names them through it.
+gpui-pre = { version = "0.3.9", features = ["test-support"] }
+gpui-pre-platform = { version = "0.3.9", features = ["test-support"] }
+# Only to write the captured frame out as a PNG. `png` rather than the default
+# set because the default set is every format GPUI's own renderer already pulls
+# in, and this needs exactly one.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Without libtest, because the frame has to be drawn on the main thread: on
+# macOS building the platform takes a `MainThreadMarker`, and libtest runs every
+# test on a worker thread. `cargo test --test render` still runs it. GPUI Kit
+# declares its own render test the same way.
+[[test]]
+name = "render"
+path = "tests/render.rs"
+harness = false
+

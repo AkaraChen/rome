@@ -1,0 +1,31 @@
+version = 1
+
+[[migrations]]
+id = 1441684881574084910
+name = "0000_init.sql"
+snapshot_name = "0000_snapshot.toml"
+
+[[migrations]]
+id = 2048693868145466206
+name = "0001_add_cookies.sql"
+snapshot_name = "0001_snapshot.toml"
+
+[[migrations]]
+id = 8406633527356282564
+name = "0002_plugin_default_view_and_storage.sql"
+snapshot_name = "0002_snapshot.toml"
+
+[[migrations]]
+id = 2706459620161654974
+name = "0003_plugin_schemas.sql"
+snapshot_name = "0003_snapshot.toml"
+
+[[migrations]]
+id = 5782178066436679357
+name = "0004_app_settings.sql"
+snapshot_name = "0004_snapshot.toml"
+
+[[migrations]]
+id = 1349166757317716977
+name = "0005_entry_article.sql"
+snapshot_name = "0005_snapshot.toml"
