@@ -15,7 +15,7 @@
  *     Response: {"id": <u64>, "result": <any>}
  *               {"id": <u64>, "error": {"message": "<string>"}}
  *
- * Host -> plugin:  describe / fetch / activate / deactivate
+ * Host -> plugin:  describe / fetch / preview / activate / deactivate
  * Plugin -> host:  http / ui / storage.get / storage.set / log
  *
  * The crux is that plugin -> host requests arrive *while* the host is waiting
@@ -856,11 +856,14 @@ function loadPlugin() {
 
 const VIEWS = new Set(["articles", "socialMedia", "pictures", "videos", "audios", "notifications"]);
 
+// `item` is absent for every call except `preview`: it is the one method the
+// host sends on behalf of a single entry rather than a whole source.
 function makeCtx(params) {
     return {
         settings: (params.settings !== null && typeof params.settings === "object") ? params.settings : {},
         params: (params.params !== null && typeof params.params === "object") ? params.params : {},
         cursor: (params.cursor === undefined || params.cursor === null) ? null : String(params.cursor),
+        item: (params.item !== null && typeof params.item === "object") ? params.item : null,
         fetch: hostFetch,
         storage,
         ui,
@@ -890,7 +893,15 @@ async function describe() {
 
     // `settings` is always present, and null when the plugin declares none, so
     // the host can deserialize it into a plain Option.
-    return { meta, settings: mod.settings === undefined ? null : mod.settings };
+    //
+    // The exported hooks are reported rather than declared in `meta`: a plugin
+    // that wrote the function has a preview, and asking its author to also say
+    // so in the manifest is one more thing to forget.
+    return {
+        meta,
+        settings: mod.settings === undefined ? null : mod.settings,
+        hooks: { preview: typeof mod.preview === "function" }
+    };
 }
 
 function validateEntry(entry, index) {
@@ -937,6 +948,46 @@ async function runFetch(params) {
     };
 }
 
+/**
+ * Draw one entry's page.
+ *
+ * Called when the reader opens an entry and the plugin exports the hook. The
+ * item carries the values the plugin asked to be handed back — its `params` —
+ * so a plugin that listed videos by id can ask its API about the video the
+ * reader clicked, instead of the host stripping whatever HTML happens to be
+ * behind the URL.
+ *
+ * `null` means "I have nothing to add", and the host keeps whatever the entry
+ * already had.
+ */
+async function runPreview(params) {
+    const mod = await loadPlugin();
+
+    if (typeof mod.preview !== "function") {
+        return null;
+    }
+
+    const ctx = makeCtx(params);
+
+    if (ctx.item === null) {
+        throw new Error("preview was called without an `item`");
+    }
+
+    const result = await mod.preview(ctx);
+
+    if (result === null || result === undefined) {
+        return null;
+    }
+
+    const content = typeof result === "string" ? result : result.content;
+
+    if (typeof content !== "string") {
+        throw new Error("plugin `preview` must return an HTML string, `{ content }`, or null");
+    }
+
+    return { content };
+}
+
 async function runLifecycle(name, params) {
     const mod = await loadPlugin();
     const hook = mod[name];
@@ -957,6 +1008,7 @@ function invoke(request) {
     switch (request.method) {
         case "describe": return describe();
         case "fetch": return runFetch(params);
+        case "preview": return runPreview(params);
         case "activate": return runLifecycle("activate", params);
         case "deactivate": return runLifecycle("deactivate", params);
         default: return Promise.reject(new Error(`unknown method: ${request.method}`));

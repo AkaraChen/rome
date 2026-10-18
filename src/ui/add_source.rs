@@ -53,20 +53,16 @@ pub fn choose(window: &mut Window, cx: &mut App, worker: Worker) {
                                 .text_color(cx.theme().muted_foreground)
                                 .child("内置示例"),
                         )
-                        .child(
-                            v_flex()
-                                .w_full()
-                                .gap_1()
-                                .mt_1()
-                                .children(crate::bundled::ALL.iter().map(|example| {
-                                    let worker = examples.clone();
+                        .child(v_flex().w_full().gap_1().mt_1().children(
+                            crate::bundled::ALL.iter().map(|example| {
+                                let worker = examples.clone();
 
-                                    example_row(example, cx).on_click(move |_, window, cx| {
-                                        window.close_dialog(cx);
-                                        describe_bundled(example.slug, window, cx, worker.clone());
-                                    })
-                                })),
-                        )
+                                example_row(example, cx).on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    describe_bundled(example.slug, window, cx, worker.clone());
+                                })
+                            }),
+                        ))
                         .child(
                             div()
                                 .mt_3()
@@ -131,12 +127,7 @@ fn describe_bundled(slug: &str, window: &mut Window, cx: &mut App, worker: Worke
     match crate::paths::write_bundled_plugin(example.slug, example.code) {
         Ok(path) => worker.send(Command::Describe { path }),
         Err(error) => {
-            super::dialog::notify(
-                &format!("写不出示例插件：{error}"),
-                "error",
-                window,
-                cx,
-            );
+            super::dialog::notify(&format!("写不出示例插件：{error}"), "error", window, cx);
         }
     }
 }
@@ -378,9 +369,8 @@ pub fn confirm_remove(
     cx: &mut App,
 ) {
     let go = dispatch.clone();
-    let message = format!(
-        "「{title}」和它抓到的所有条目都会被删掉，这个操作不能撤销。插件本身不受影响。"
-    );
+    let message =
+        format!("「{title}」和它抓到的所有条目都会被删掉，这个操作不能撤销。插件本身不受影响。");
 
     super::dialog::confirm(
         "移除信息源？",

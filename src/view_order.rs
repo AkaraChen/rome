@@ -131,7 +131,14 @@ mod tests {
 
         assert_eq!(
             names(&resolve(Some(&stored))),
-            ["pictures", "articles", "social", "videos", "audios", "notifications"]
+            [
+                "pictures",
+                "articles",
+                "social",
+                "videos",
+                "audios",
+                "notifications"
+            ]
         );
     }
 
@@ -146,7 +153,10 @@ mod tests {
 
         assert_eq!(order.len(), View::ALL.len());
         assert_eq!(order[0], View::Pictures);
-        assert_eq!(&names(&order)[1..], ["articles", "social", "videos", "audios", "notifications"]);
+        assert_eq!(
+            &names(&order)[1..],
+            ["articles", "social", "videos", "audios", "notifications"]
+        );
     }
 
     #[test]
@@ -166,7 +176,10 @@ mod tests {
         let order = resolve(Some(&stored));
 
         assert_eq!(order.len(), View::ALL.len());
-        assert_eq!(order.iter().filter(|view| **view == View::Pictures).count(), 1);
+        assert_eq!(
+            order.iter().filter(|view| **view == View::Pictures).count(),
+            1
+        );
     }
 
     #[test]

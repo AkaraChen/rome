@@ -186,6 +186,14 @@ pub struct EntryDetail {
     /// The body of the entry's own page, which the host read for the entries
     /// whose plugin had none. See [`Article`].
     pub article: Article,
+    /// The page the entry's own plugin drew for it, when it exports a
+    /// `preview` hook. See [`Article`].
+    ///
+    /// Separate from [`EntryDetail::article`] because it is a different
+    /// provenance: the plugin knows what the item is and can ask its own API,
+    /// where the host only had a URL to fetch and strip. Exactly one of the
+    /// two is ever `Reading` or `Read`.
+    pub preview: Article,
     /// The picture the feed attached to this entry, if any.
     ///
     /// Carried separately from the content because it is the article's hero:

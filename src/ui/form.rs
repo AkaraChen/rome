@@ -178,7 +178,10 @@ impl Form {
         let mut choices = HashMap::new();
 
         for field in &fields {
-            let current = values.get(&field.key).cloned().unwrap_or_else(|| field.default.clone());
+            let current = values
+                .get(&field.key)
+                .cloned()
+                .unwrap_or_else(|| field.default.clone());
 
             match field.kind {
                 Kind::Text | Kind::Password | Kind::Number | Kind::Textarea => {
@@ -255,10 +258,12 @@ impl Form {
 
     fn field(&self, field: &Field, cx: &App) -> AnyElement {
         let control: AnyElement = match &field.kind {
-            Kind::Text | Kind::Password | Kind::Number | Kind::Textarea => match self.inputs.get(&field.key) {
-                Some(state) => Input::new(state).bordered(true).into_any_element(),
-                None => div().into_any_element(),
-            },
+            Kind::Text | Kind::Password | Kind::Number | Kind::Textarea => {
+                match self.inputs.get(&field.key) {
+                    Some(state) => Input::new(state).bordered(true).into_any_element(),
+                    None => div().into_any_element(),
+                }
+            }
             Kind::Checkbox => {
                 let choices = self.choices.clone();
                 let key = field.key.clone();
@@ -299,9 +304,10 @@ impl Form {
                         let value = option.value.clone();
                         let active = selected.as_deref() == Some(option.value.as_str());
 
-                        let mut button = Button::new(format!("option:{}:{}", field.key, option.value))
-                            .xsmall()
-                            .label(option.label.clone());
+                        let mut button =
+                            Button::new(format!("option:{}:{}", field.key, option.value))
+                                .xsmall()
+                                .label(option.label.clone());
 
                         button = if active {
                             button.primary()
@@ -405,4 +411,3 @@ fn scalar_text(value: &Value) -> String {
         other => other.to_string(),
     }
 }
-

@@ -68,7 +68,14 @@ fn moving_a_view_up_reorders_the_next_snapshot() {
 
     assert_eq!(
         tabs(&opening),
-        ["articles", "social", "pictures", "videos", "audios", "notifications"]
+        [
+            "articles",
+            "social",
+            "pictures",
+            "videos",
+            "audios",
+            "notifications"
+        ]
     );
 
     worker.send(Command::MoveView {
@@ -80,7 +87,14 @@ fn moving_a_view_up_reorders_the_next_snapshot() {
 
     assert_eq!(
         tabs(&moved),
-        ["articles", "pictures", "social", "videos", "audios", "notifications"]
+        [
+            "articles",
+            "pictures",
+            "social",
+            "videos",
+            "audios",
+            "notifications"
+        ]
     );
 
     // Nothing was added or lost: a reorder is a permutation, and a row that
@@ -140,6 +154,13 @@ fn a_move_survives_the_worker_restarting() {
     assert_eq!(reopened.tabs[4].view, View::Notifications);
     assert_eq!(
         tabs(&reopened),
-        ["articles", "social", "pictures", "videos", "notifications", "audios"]
+        [
+            "articles",
+            "social",
+            "pictures",
+            "videos",
+            "notifications",
+            "audios"
+        ]
     );
 }

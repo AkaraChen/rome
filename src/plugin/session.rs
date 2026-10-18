@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::db::Database;
 use crate::http::{Http, RequestInit};
-use crate::models::{Plugin, Source, View};
+use crate::models::{Entry, Plugin, Source, View};
 use crate::paths;
 use crate::plugin::sidecar::{self, Sidecar};
 use crate::plugin::{DialogRequest, HostRequest, method};
@@ -116,6 +116,9 @@ pub struct Manifest {
     /// taking a blob of JSON is what lets the install dialog ask for it in the
     /// same controls as everything else.
     pub params: Value,
+    /// Whether the module exports a `preview` hook. See
+    /// [`crate::models::Plugin::has_preview`].
+    pub preview: bool,
 }
 
 impl Manifest {
@@ -160,11 +163,7 @@ impl Manifest {
         // running a plugin that was written against a different vocabulary. A
         // plugin is code; guessing at what a version 2 plugin expects is how a
         // reader ends up with entries nobody can explain.
-        let major = api_version
-            .split('.')
-            .next()
-            .unwrap_or_default()
-            .trim();
+        let major = api_version.split('.').next().unwrap_or_default().trim();
         if major != "1" {
             return Err(PluginError::Malformed(format!(
                 "this plugin speaks interface version {api_version}, and this Rome \
@@ -188,6 +187,14 @@ impl Manifest {
                 .unwrap_or(View::Articles),
             settings: result.get("settings").cloned().unwrap_or(Value::Null),
             params: meta.get("params").cloned().unwrap_or(Value::Null),
+            // Reported by the harness from the module itself rather than
+            // declared in `meta`; a plugin written against an older harness
+            // simply has no `hooks` and therefore no preview.
+            preview: result
+                .get("hooks")
+                .and_then(|hooks| hooks.get("preview"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         })
     }
 }
@@ -314,7 +321,9 @@ impl<'a> Session<'a> {
         let Self { sidecar, services } = self;
 
         sidecar
-            .call(method::ACTIVATE, params, |request| services.dispatch(request))
+            .call(method::ACTIVATE, params, |request| {
+                services.dispatch(request)
+            })
             .map_err(|error| PluginError::Run(error.to_string()))?;
 
         Ok(())
@@ -365,6 +374,49 @@ impl<'a> Session<'a> {
 
         Fetched::parse(&result)
     }
+
+    /// Ask the plugin to draw one entry's page.
+    ///
+    /// The source's parameters and settings go along with the item because a
+    /// preview is usually the same site read more deeply: which account, which
+    /// region, which key — the same three scopes as a fetch, plus the item.
+    ///
+    /// `Ok(None)` means the plugin had nothing to add, which is a normal
+    /// answer rather than a failure: the host keeps whatever the entry already
+    /// had.
+    fn preview(
+        &mut self,
+        plugin: &Plugin,
+        source: &Source,
+        entry: &Entry,
+    ) -> Result<Option<String>, PluginError> {
+        let params = json!({
+            "settings": plugin.settings,
+            "params": source.params,
+            "item": {
+                "id": entry.external_id,
+                "title": entry.title,
+                "url": entry.url,
+                // Handed back exactly as the plugin gave it: the host never
+                // looks inside, which is what makes it the plugin's.
+                "params": entry.params,
+            },
+        });
+
+        let Self { sidecar, services } = self;
+
+        let result = sidecar
+            .call(method::PREVIEW, params, |request| {
+                services.dispatch(request)
+            })
+            .map_err(|error| PluginError::Run(error.to_string()))?;
+
+        Ok(result
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|content| !content.trim().is_empty())
+            .map(str::to_owned))
+    }
 }
 
 /// What one run of a plugin returned.
@@ -376,9 +428,12 @@ struct Fetched {
 
 impl Fetched {
     fn parse(result: &Value) -> Result<Self, PluginError> {
-        let entries = result.get("entries").and_then(Value::as_array).ok_or_else(|| {
-            PluginError::Malformed("`fetch` did not return an `entries` array".to_owned())
-        })?;
+        let entries = result
+            .get("entries")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                PluginError::Malformed("`fetch` did not return an `entries` array".to_owned())
+            })?;
 
         let mut parsed = Vec::with_capacity(entries.len());
         for (index, entry) in entries.iter().enumerate() {
@@ -421,6 +476,13 @@ fn parse_entry(value: &Value, index: usize) -> Result<NewEntry, PluginError> {
         content: text("content"),
         summary: text("summary"),
         image: text("image"),
+        // Opaque to the host; only an object, because it is handed back to the
+        // plugin as a bag of named values and anything else would be a shape
+        // the plugin's own `preview` could not read.
+        params: value
+            .get("params")
+            .filter(|params| params.is_object())
+            .cloned(),
     })
 }
 
@@ -474,6 +536,45 @@ pub fn refresh_source(
             Err(error)
         }
     }
+}
+
+/// Ask a plugin to draw one entry's page, and keep what it drew.
+///
+/// The half of the entry-opening path the plugin owns. A plugin that exports a
+/// `preview` hook said it can describe an item better than the host can by
+/// fetching the item's URL, and it said so by exporting the function — so this
+/// runs it with the values the plugin attached to the entry when it listed it.
+///
+/// `Ok(None)` is a normal answer: the hook can decide, per item, that it has
+/// nothing to add. Whether the run succeeded is recorded here rather than left
+/// to the caller, because an entry marked as previewed with no preview in it
+/// would never be asked again — the same rule as the host's own article.
+pub fn preview_entry(
+    db: &mut Database,
+    http: &mut Http,
+    events: Option<&flume::Sender<Event>>,
+    entry_id: u64,
+) -> Result<Option<String>, PluginError> {
+    let entry = store::entry(db, entry_id).map_err(environment)?;
+    let source = store::source(db, entry.source_id).map_err(environment)?;
+    let plugin = store::plugin(db, source.plugin_id).map_err(environment)?;
+
+    if !plugin.has_preview {
+        return Ok(None);
+    }
+
+    // No dialogs: reading an entry must not stop to ask a question, and a
+    // plugin that needs one has misread what a preview is for.
+    let mut session = Session::start(&plugin, db, http, None, events)?;
+
+    let drawn = match session.preview(&plugin, &source, &entry) {
+        Ok(drawn) => drawn,
+        Err(error) => return Err(error.with_log(session.log())),
+    };
+
+    store::set_preview(db, entry_id, drawn.clone(), store::now()).map_err(environment)?;
+
+    Ok(drawn)
 }
 
 /// Run a plugin's `activate` hook.
@@ -711,7 +812,9 @@ impl Services<'_> {
             // these are the ones it lets through; a question arriving means the
             // two lists have drifted apart, which is a bug in this file rather
             // than anything the plugin did.
-            other => Err(format!("{other:?} is a question, and this is the report path")),
+            other => Err(format!(
+                "{other:?} is a question, and this is the report path"
+            )),
         }
     }
 
@@ -832,7 +935,8 @@ mod tests {
         fn new() -> Self {
             let serial = NEXT_SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            let dir = std::env::temp_dir().join(format!("rome-session-{}-{serial}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("rome-session-{}-{serial}", std::process::id()));
             std::fs::create_dir_all(&dir).expect("could not create a scratch directory");
 
             let db =
@@ -862,21 +966,27 @@ mod tests {
     }
 
     /// Install `source_code` as a plugin and create one source for it.
+    ///
+    /// Described first, the way the application does it, so a plugin's declared
+    /// hooks land on the row exactly as they would for a real install.
     fn install(db: &mut Database, source_code: &str) -> u64 {
+        let manifest = describe(source_code).expect("the plugin should describe");
+
         let plugin = store::install_plugin(
             db,
             NewPlugin {
-                plugin_id: "test.plugin".to_owned(),
-                name: "Test".to_owned(),
-                version: "1.0.0".to_owned(),
-                api_version: "1".to_owned(),
-                description: None,
-                icon: None,
-                default_view: View::Articles,
+                plugin_id: manifest.plugin_id.clone(),
+                name: manifest.name.clone(),
+                version: manifest.version.clone(),
+                api_version: manifest.api_version.clone(),
+                description: manifest.description.clone(),
+                icon: manifest.icon.clone(),
+                default_view: manifest.default_view,
                 source_code: source_code.to_owned(),
                 settings: json!({}),
-                settings_schema: json!({}),
-                params_schema: json!({}),
+                settings_schema: manifest.settings.clone(),
+                params_schema: manifest.params.clone(),
+                has_preview: manifest.preview,
             },
         )
         .expect("the plugin should install");
@@ -1091,8 +1201,8 @@ export async function fetch(ctx) {
         );
 
         let mut http = Http::new();
-        let report =
-            refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the refresh should work");
+        let report = refresh_source(&mut scratch.db, &mut http, source_id, None)
+            .expect("the refresh should work");
 
         assert_eq!(report.inserted, 2);
         assert_eq!(report.updated, 0);
@@ -1112,6 +1222,86 @@ export async function fetch(ctx) {
         assert_eq!(first.published_at, Some(1700000000));
         // A plugin cannot mark its own entries read, whatever it returns.
         assert!(!first.read);
+    }
+
+    /// The item's own parameters are what the preview hook is handed, and what
+    /// it draws is stored against the entry.
+    #[test]
+    fn the_preview_hook_draws_a_page_from_the_items_params() {
+        require_runtime!();
+
+        let mut scratch = Scratch::new();
+        let source_id = install(
+            &mut scratch.db,
+            r#"
+export const meta = { id: 'test.plugin', name: 'Test', version: '1.0.0', apiVersion: '1' }
+
+export async function fetch(ctx) {
+  return { entries: [{ id: 'v1', title: 'A video', params: { bvid: 'BV1xx' } }] }
+}
+
+export async function preview(ctx) {
+  return { content: `<p>${ctx.item.params.bvid}</p>` }
+}
+"#,
+        );
+
+        let mut http = Http::new();
+        refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the refresh");
+
+        let entry = store::timeline(&mut scratch.db, None, 10)
+            .expect("a timeline")
+            .into_iter()
+            .next()
+            .expect("one entry");
+
+        let drawn =
+            preview_entry(&mut scratch.db, &mut http, None, entry.id).expect("the preview runs");
+
+        assert_eq!(drawn.as_deref(), Some("<p>BV1xx</p>"));
+
+        let stored = store::entry(&mut scratch.db, entry.id).expect("the entry");
+        assert_eq!(stored.preview.as_deref(), Some("<p>BV1xx</p>"));
+        assert!(stored.preview_at.is_some());
+    }
+
+    /// A plugin that exports no hook is not started at all: `preview_entry`
+    /// answers from the row, which is what keeps opening an entry of an
+    /// ordinary feed from launching a JavaScript runtime.
+    #[test]
+    fn a_plugin_without_a_preview_hook_is_not_asked() {
+        require_runtime!();
+
+        let mut scratch = Scratch::new();
+        let source_id = install(
+            &mut scratch.db,
+            r#"
+export const meta = { id: 'test.plugin', name: 'Test', version: '1.0.0', apiVersion: '1' }
+
+export async function fetch(ctx) {
+  return { entries: [{ id: 'a', title: 'First' }] }
+}
+"#,
+        );
+
+        let mut http = Http::new();
+        refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the refresh");
+
+        let entry = store::timeline(&mut scratch.db, None, 10)
+            .expect("a timeline")
+            .into_iter()
+            .next()
+            .expect("one entry");
+
+        let drawn =
+            preview_entry(&mut scratch.db, &mut http, None, entry.id).expect("the call succeeds");
+
+        assert_eq!(drawn, None);
+
+        let stored = store::entry(&mut scratch.db, entry.id).expect("the entry");
+        // Unasked, rather than asked and empty: the timestamp is what says the
+        // hook ran.
+        assert_eq!(stored.preview_at, None);
     }
 
     /// A second run over the same items writes nothing: `id` is the whole of
@@ -1135,8 +1325,8 @@ export async function fetch(ctx) {
 
         let mut http = Http::new();
         refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the first refresh");
-        let second =
-            refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the second refresh");
+        let second = refresh_source(&mut scratch.db, &mut http, source_id, None)
+            .expect("the second refresh");
 
         assert_eq!(second.inserted, 0);
         assert_eq!(second.unchanged, 2);
@@ -1251,7 +1441,8 @@ export async function fetch(ctx) {{
         );
 
         let mut http = Http::new();
-        refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the refresh should work");
+        refresh_source(&mut scratch.db, &mut http, source_id, None)
+            .expect("the refresh should work");
 
         let entries =
             store::timeline(&mut scratch.db, Some(View::Articles), 10).expect("a timeline");
@@ -1296,7 +1487,10 @@ export async function fetch(ctx) {
             .expect_err("a plugin that throws should fail the refresh");
 
         let message = error.to_string();
-        assert!(message.contains("boom"), "the thrown error is in it: {message}");
+        assert!(
+            message.contains("boom"),
+            "the thrown error is in it: {message}"
+        );
         assert!(
             message.contains("about to fail"),
             "and so is what the plugin logged first: {message}"
@@ -1434,7 +1628,8 @@ export async function fetch(ctx) {
         refresh_source(&mut scratch.db, &mut http, source_id, None)
             .expect("a plugin that catches the refusal should still refresh");
 
-        let entries = store::timeline(&mut scratch.db, Some(View::Articles), 10).expect("a timeline");
+        let entries =
+            store::timeline(&mut scratch.db, Some(View::Articles), 10).expect("a timeline");
         let title = &entries
             .iter()
             .find(|entry| entry.external_id == "one")

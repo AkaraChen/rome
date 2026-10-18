@@ -10,6 +10,9 @@
 //! The parsing lives in [`super::content`] because it is the part worth
 //! testing; this file is the mapping from those blocks to GPUI elements.
 
+use std::cell::RefCell;
+use std::ops::Range;
+
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
@@ -21,7 +24,7 @@ use crate::snapshot::{Article, EntryDetail, Snapshot};
 use crate::worker::Command;
 
 use super::content::{self, Link, Parsed};
-use super::{Action, Dispatch, entry_list::placeholder};
+use super::{Action, Dispatch, entry_list::placeholder, picture};
 
 // Re-exported for the tests that exercise the parser through the pane's old
 // path. The parser itself is `content`'s, and new code should use it directly.
@@ -38,6 +41,63 @@ pub use super::content::{Block, blocks};
 /// Named because the toolbar is laid out against the same number: the buttons
 /// act on the text, so they belong on its spine rather than the window's edge.
 const MEASURE: Pixels = px(680.);
+
+thread_local! {
+    /// Where the article column is scrolled to, kept across frames.
+    ///
+    /// It has to live outside the element tree: a [`ScrollHandle`] is the
+    /// scroll state itself, so one built fresh in each `render` would report
+    /// the top of the article every frame and the column could never move.
+    static READING_SCROLL: RefCell<Option<ScrollHandle>> = const { RefCell::new(None) };
+}
+
+fn reading_scroll() -> ScrollHandle {
+    READING_SCROLL.with(|slot| {
+        slot.borrow_mut()
+            .get_or_insert_with(ScrollHandle::new)
+            .clone()
+    })
+}
+
+/// How many blocks past the viewport are drawn with their pictures loaded.
+///
+/// Half a screen of slack, so a picture is fetched while it is still below the
+/// fold rather than at the moment it crosses it.
+const LOOKAHEAD: usize = 6;
+
+/// How many blocks at the top of an article are drawn with their pictures
+/// before the column has told us where it is scrolled to.
+const EAGER: usize = 8;
+
+/// The blocks whose pictures should be fetched this frame.
+///
+/// GPUI starts an image's request in `request_layout`, and layout runs for
+/// every element whether or not it is on screen — a scrollbar does not remove
+/// anything from the tree. So an article with forty pictures in it starts forty
+/// requests the moment it opens, which is the one place in the app where a
+/// fetch is not already limited to what the reader can see: the two lists are
+/// virtualized, and this column is not.
+///
+/// Not drawing an image is therefore the only way to defer it, and the block
+/// keeps its place as a placeholder until a later frame draws it for real.
+/// Every scroll is a repaint, so a picture below the fold is always drawn by
+/// the frame in which it comes into view.
+fn visible(scroll: &ScrollHandle, blocks: usize) -> Range<usize> {
+    let measured =
+        blocks > 0 && scroll.children_count() == blocks && scroll.bounds().size.height > px(0.);
+
+    // The counts disagree before the column has been laid out once, and after
+    // it has been handed a different entry with a different number of blocks.
+    // What was recorded then describes a column that no longer exists, so the
+    // first screenful is drawn instead of trusting it.
+    if !measured {
+        return 0..EAGER.min(blocks);
+    }
+
+    let top = scroll.top_item().saturating_sub(LOOKAHEAD);
+    let bottom = (scroll.bottom_item() + LOOKAHEAD).min(blocks - 1);
+    top..bottom + 1
+}
 
 /// Build the reading pane.
 pub fn pane(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
@@ -94,13 +154,20 @@ fn selected_source(snapshot: &Snapshot) -> u64 {
 
 /// The HTML the body should be drawn from.
 ///
-/// Three sources in order of how much they are the entry rather than a note
-/// about it. The plugin's own content is what the source said the entry is. The
-/// article is what the host read off the page the entry points at, which is the
-/// only body a link aggregator will ever have. The summary is what is left —
-/// for Hacker News that is a score and a comment count, which is not a body at
-/// all but is better than an empty pane, which would look like a bug.
+/// Four sources, in order of how much they are the entry rather than a note
+/// about it. The plugin's own page for the item is the best thing the app can
+/// have: it was made by the code that listed the item, from the item's own
+/// parameters, and it is the only source that knows what the item *is*. What
+/// the plugin said in the list comes next. The article is what the host read
+/// off the page the entry points at, which is the only body a link aggregator
+/// will ever have. The summary is what is left — for Hacker News that is a
+/// score and a comment count, which is not a body at all but is better than an
+/// empty pane, which would look like a bug.
 fn body_html(entry: &EntryDetail) -> &str {
+    if let Article::Read(page) = &entry.preview {
+        return page;
+    }
+
     entry
         .content
         .as_deref()
@@ -304,44 +371,55 @@ fn body(entry: &EntryDetail, parsed: &Parsed, cx: &App) -> AnyElement {
         .and_then(|raw| content::image_url(base, raw));
     let links = content::usable_links(&parsed.links, base);
 
-    let mut column = v_flex()
-        // Capped and centred in whatever space is left; see [`MEASURE`].
-        .w_full()
-        .max_w(MEASURE)
-        .mx_auto()
-        .gap_3()
-        .px_6()
-        .py_5()
-        .child(title(entry, cx))
-        .when(!meta.is_empty(), |this| {
-            this.child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(meta),
-            )
-        })
-        // The hero sits under the title rather than above it: a feed image
-        // that takes a moment to load must not push the headline down, and a
-        // dead one collapses to nothing where it is, not over the title.
-        .when_some(hero.clone(), |this, url| this.child(picture(url, px(360.))));
+    // Built as a list rather than by chaining `.child` so that a block knows its
+    // own index while it is drawn: whether a picture is fetched depends on
+    // where its block sits, and a chain does not say. `pictures` holds the
+    // images that were drawn as a placeholder and still need their element.
+    let mut column: Vec<AnyElement> = Vec::new();
+    let mut pictures: Vec<(usize, String, Pixels)> = Vec::new();
 
-    // What the host is doing about the entry's own page, when it is doing
-    // something. Without this an aggregator's entry is one line of metadata and
-    // looks like a story that turned out to be a sentence long, and a page that
-    // could not be read looks like a page that had nothing in it.
-    let waiting = match &entry.article {
-        Article::Reading => Some("正在读取原文…"),
-        Article::Failed => Some("没能读到原文，下次打开再试"),
+    column.push(title(entry, cx));
+
+    if !meta.is_empty() {
+        column.push(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(meta)
+                .into_any_element(),
+        );
+    }
+
+    // The hero sits under the title rather than above it: a feed image that
+    // takes a moment to load must not push the headline down.
+    //
+    // Always fetched, because it is the entry's face and the top of the column
+    // is the one place that is certainly on screen. It is the article's own
+    // images that are worth deferring.
+    if let Some(url) = hero.clone() {
+        column.push(picture::hero(url, cx));
+    }
+
+    // What the host or the plugin is doing about the entry's own page, when it
+    // is doing something. Without this an aggregator's entry is one line of
+    // metadata and looks like a story that turned out to be a sentence long,
+    // and a page that could not be read looks like a page that had nothing in
+    // it.
+    let waiting = match (&entry.preview, &entry.article) {
+        (Article::Reading, _) => Some("正在读取详情…"),
+        (Article::Failed, _) => Some("详情没能读到，下次打开再试"),
+        (_, Article::Reading) => Some("正在读取原文…"),
+        (_, Article::Failed) => Some("没能读到原文，下次打开再试"),
         _ => None,
     };
 
     if let Some(message) = waiting {
-        column = column.child(
+        column.push(
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(message),
+                .child(message)
+                .into_any_element(),
         );
     }
 
@@ -350,32 +428,53 @@ fn body(entry: &EntryDetail, parsed: &Parsed, cx: &App) -> AnyElement {
         // has already said why the pane is empty, and "no body" underneath it
         // would contradict what it just said.
         if waiting.is_none() {
-            column = column.child(
+            column.push(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("这条没有正文"),
+                    .child("这条没有正文")
+                    .into_any_element(),
             );
         }
     } else {
-        column = column.children(
-            parsed
-                .blocks
-                .iter()
-                .filter_map(|block| draw(block, base, hero.as_deref(), cx)),
-        );
+        for block in &parsed.blocks {
+            let slot = column.len();
+            if let Some(element) = draw(block, base, hero.as_deref(), slot, &mut pictures, cx) {
+                column.push(element);
+            }
+        }
     }
 
     if !links.is_empty() {
-        column = column.child(link_section(&links, cx));
+        column.push(link_section(&links, cx));
     }
 
-    div()
+    let scroll = reading_scroll();
+    let band = visible(&scroll, column.len());
+    for (slot, url, cap) in pictures {
+        if band.contains(&slot) {
+            column[slot] = picture::picture(url, cap, cx);
+        }
+    }
+
+    // The scrolling element is the column itself, not a full-width box around
+    // it. GPUI records the bounds of a tracked element's direct children and
+    // nothing deeper, so a wrapper would leave the article as one tall child
+    // and the handle unable to say which block is on screen.
+    v_flex()
         .id("reading")
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
-        .child(column)
+        .track_scroll(&scroll)
+        // Capped and centred in whatever space is left; see [`MEASURE`].
+        .w_full()
+        .max_w(MEASURE)
+        .mx_auto()
+        .gap_3()
+        .px_6()
+        .py_5()
+        .children(column)
         .into_any_element()
 }
 
@@ -404,7 +503,18 @@ fn title(entry: &EntryDetail, cx: &App) -> AnyElement {
 
 /// Draw one block, or `None` when it is an image that cannot or should not be
 /// drawn.
-fn draw(block: &Block, base: Option<&str>, hero: Option<&str>, cx: &App) -> Option<AnyElement> {
+///
+/// `slot` is the index the block will take in the column, and `pictures` takes
+/// the images that came back as a placeholder; `body` replaces the ones that
+/// are close enough to the viewport to be fetched.
+fn draw(
+    block: &Block,
+    base: Option<&str>,
+    hero: Option<&str>,
+    slot: usize,
+    pictures: &mut Vec<(usize, String, Pixels)>,
+    cx: &App,
+) -> Option<AnyElement> {
     Some(match block {
         Block::Paragraph(text) => paragraph(text, cx).into_any_element(),
         Block::Heading(text) => div()
@@ -460,7 +570,9 @@ fn draw(block: &Block, base: Option<&str>, hero: Option<&str>, cx: &App) -> Opti
                 return None;
             }
 
-            picture(url, px(480.))
+            let cap = px(480.);
+            pictures.push((slot, url, cap));
+            picture::placeholder(cap, cx)
         }
         Block::Divider => div()
             .w_full()
@@ -469,33 +581,6 @@ fn draw(block: &Block, base: Option<&str>, hero: Option<&str>, cx: &App) -> Opti
             .bg(cx.theme().border)
             .into_any_element(),
     })
-}
-
-/// One image, constrained to the column.
-///
-/// The height cap keeps a tall portrait from becoming a full screen of picture
-/// before the article starts. `Contain` letterboxes instead of cropping, which
-/// is the right compromise for a reader: the whole image is evidence, and a
-/// tight `Cover` crop can cut the caption out of a chart.
-///
-/// A URL that fails to load is replaced with an empty element. Feed images
-/// fail routinely — hotlink protection, dead CDNs — and a warning box for each
-/// one would bury the words under the article's broken furniture. The failure
-/// collapses to zero height, so the rest of the layout does not move.
-fn picture(url: String, cap: Pixels) -> AnyElement {
-    div()
-        .w_full()
-        .max_h(cap)
-        .overflow_hidden()
-        .rounded_md()
-        .child(
-            gpui_kit::img(url)
-                .w_full()
-                .max_h(cap)
-                .object_fit(ObjectFit::Contain)
-                .with_fallback(|| div().into_any_element()),
-        )
-        .into_any_element()
 }
 
 fn paragraph(text: &str, cx: &App) -> Div {

@@ -61,8 +61,8 @@ pub fn add_to_list(
                         );
                     }
 
-                    content.child(
-                        v_flex().w_full().gap_1().children(lists.iter().map(|list| {
+                    content
+                        .child(v_flex().w_full().gap_1().children(lists.iter().map(|list| {
                             let worker = worker.clone();
                             let list_id = list.id;
 
@@ -74,18 +74,15 @@ pub fn add_to_list(
                                     worker.send(Command::AddToList { list_id, entry_id });
                                     window.close_dialog(cx);
                                 })
-                        })),
-                    )
-                    .child(
-                        // The field is always here, not behind a "new list"
-                        // button: a reader with no lists yet is the one most
-                        // likely to be reading this dialog, and making them
-                        // press a second button to find out they can type is a
-                        // step for nothing.
-                        div()
-                            .mt_2()
-                            .child(Input::new(&input).bordered(true)),
-                    )
+                        })))
+                        .child(
+                            // The field is always here, not behind a "new list"
+                            // button: a reader with no lists yet is the one most
+                            // likely to be reading this dialog, and making them
+                            // press a second button to find out they can type is a
+                            // step for nothing.
+                            div().mt_2().child(Input::new(&input).bordered(true)),
+                        )
                 }
             })
             .on_ok({

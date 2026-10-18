@@ -124,7 +124,10 @@ async fn fetch(
     body: AsyncBody,
 ) -> anyhow::Result<Response<AsyncBody>> {
     if parts.uri.scheme().is_none() {
-        anyhow::bail!("an image URL has to be absolute, and this one is {}", parts.uri);
+        anyhow::bail!(
+            "an image URL has to be absolute, and this one is {}",
+            parts.uri
+        );
     }
 
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())?;

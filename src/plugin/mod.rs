@@ -19,8 +19,9 @@
 //! Host to plugin:
 //!
 //! ```text
-//! describe   {}                                                        -> {"meta": {...}, "settings": {...}}
+//! describe   {}                                                        -> {"meta": {...}, "settings": {...}, "hooks": {...}}
 //! fetch      {"settings": {...}, "params": {...}, "cursor": <str|null>} -> {"entries": [...], "cursor": <str|null>}
+//! preview    {"settings": {...}, "params": {...}, "item": {...}}       -> {"content": "<html>"} | null
 //! activate   {"settings": {...}, "params": {...}}                       -> null
 //! deactivate {}                                                        -> null
 //! ```
@@ -47,6 +48,7 @@ pub mod method {
     // Host to plugin.
     pub const DESCRIBE: &str = "describe";
     pub const FETCH: &str = "fetch";
+    pub const PREVIEW: &str = "preview";
     pub const ACTIVATE: &str = "activate";
     pub const DEACTIVATE: &str = "deactivate";
 
@@ -134,7 +136,10 @@ impl DialogRequest {
                 message: text("message").unwrap_or_default(),
                 title: text("title"),
                 placeholder: text("placeholder"),
-                secret: params.get("secret").and_then(Value::as_bool).unwrap_or(false),
+                secret: params
+                    .get("secret")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             },
             "notify" => Self::Notify {
                 message: text("message").unwrap_or_default(),

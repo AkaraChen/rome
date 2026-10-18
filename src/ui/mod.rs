@@ -26,6 +26,7 @@ pub mod dialog;
 pub mod entry_list;
 pub mod form;
 pub mod lists;
+pub mod picture;
 pub mod plugins;
 pub mod reading_pane;
 pub mod search;

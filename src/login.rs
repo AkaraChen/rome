@@ -228,12 +228,7 @@ impl Render for LoginView {
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(dangerous)
-                        .child(message.clone()),
-                )
+                .child(div().text_sm().text_color(dangerous).child(message.clone()))
                 // The page could not be shown, but the user can still log in
                 // somewhere that works. Their browser's cookies stay in their
                 // browser; this is a way out, not a fix.

@@ -95,10 +95,7 @@ impl RequestInit {
             .unwrap_or_default()
             .to_owned();
 
-        let body = value
-            .get("body")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        let body = value.get("body").and_then(Value::as_str).map(str::to_owned);
 
         let mut headers = Vec::new();
 
@@ -645,9 +642,7 @@ async fn store_cookie(conn: &mut Db, jar: JarCookie) -> Result<(), HttpError> {
         .exec(&mut *conn)
         .await
         .map_err(storage)?;
-    let existing = rows
-        .into_iter()
-        .find(|cookie| same_cookie(cookie, &jar));
+    let existing = rows.into_iter().find(|cookie| same_cookie(cookie, &jar));
 
     match existing {
         // A past expiry, or a non-positive `Max-Age`, is how a server deletes a
@@ -819,7 +814,8 @@ fn domain_matches(host: &str, cookie_domain: &str, host_only: bool) -> bool {
     }
     match host.len().checked_sub(cookie_domain.len()) {
         Some(offset) if offset >= 1 => {
-            host.get(..offset).is_some_and(|prefix| prefix.ends_with('.'))
+            host.get(..offset)
+                .is_some_and(|prefix| prefix.ends_with('.'))
                 && host.get(offset..) == Some(cookie_domain)
         }
         _ => false,
@@ -891,7 +887,11 @@ mod tests {
         // The whole point of the boundary check: a suffix that is not a label
         // suffix must not match.
         assert!(!domain_matches("notexample.com", "example.com", false));
-        assert!(!domain_matches("example.com.evil.com", "example.com", false));
+        assert!(!domain_matches(
+            "example.com.evil.com",
+            "example.com",
+            false
+        ));
         assert!(!domain_matches("com", "example.com", false));
     }
 
@@ -956,7 +956,8 @@ mod tests {
 
     #[test]
     fn parses_a_domain_attribute_and_strips_its_dot() {
-        let jar = parse_set_cookie("a.example.com", "/", "sid=1; Domain=.Example.COM", NOW).unwrap();
+        let jar =
+            parse_set_cookie("a.example.com", "/", "sid=1; Domain=.Example.COM", NOW).unwrap();
         // `.Example.COM` normalises to lower-case with no leading dot.
         assert_eq!(jar.domain, "example.com");
         assert!(!jar.host_only);
@@ -967,7 +968,9 @@ mod tests {
         // example.com may not set a cookie for another.com ...
         assert!(parse_set_cookie("example.com", "/", "sid=1; Domain=other.com", NOW).is_none());
         // ... nor for a domain that only looks like a suffix of it.
-        assert!(parse_set_cookie("notexample.com", "/", "sid=1; Domain=example.com", NOW).is_none());
+        assert!(
+            parse_set_cookie("notexample.com", "/", "sid=1; Domain=example.com", NOW).is_none()
+        );
     }
 
     #[test]
@@ -1045,9 +1048,18 @@ mod tests {
     fn a_different_path_or_name_or_domain_is_a_new_cookie() {
         let stored = cookie_record("sid", "example.com", "/", false);
 
-        assert!(!same_cookie(&stored, &jar("sid", "example.com", "/a", false)));
-        assert!(!same_cookie(&stored, &jar("token", "example.com", "/", false)));
-        assert!(!same_cookie(&stored, &jar("sid", "a.example.com", "/", false)));
+        assert!(!same_cookie(
+            &stored,
+            &jar("sid", "example.com", "/a", false)
+        ));
+        assert!(!same_cookie(
+            &stored,
+            &jar("token", "example.com", "/", false)
+        ));
+        assert!(!same_cookie(
+            &stored,
+            &jar("sid", "a.example.com", "/", false)
+        ));
     }
 
     #[test]
@@ -1055,7 +1067,8 @@ mod tests {
         // RFC 6265 §5.3 step 11 replaces on name, domain and path alone, so a
         // domain cookie overwrites a host-only one of the same name.
         let stored = cookie_record("sid", "example.com", "/", true);
-        let incoming = parse_set_cookie("example.com", "/", "sid=1; Domain=example.com", NOW).unwrap();
+        let incoming =
+            parse_set_cookie("example.com", "/", "sid=1; Domain=example.com", NOW).unwrap();
         assert!(same_cookie(&stored, &incoming));
     }
 

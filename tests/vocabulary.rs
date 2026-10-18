@@ -115,7 +115,11 @@ fn the_questions_are_the_ones_that_wait() {
 
     for (kind, _, request) in vocabulary() {
         let expected = waiting.contains(&kind);
-        assert_eq!(request.is_blocking(), expected, "`{kind}` is in the wrong set");
+        assert_eq!(
+            request.is_blocking(),
+            expected,
+            "`{kind}` is in the wrong set"
+        );
 
         if reported.contains(&kind) {
             assert!(!request.is_blocking());
@@ -183,7 +187,10 @@ fn a_progress_value_outside_the_range_is_pinned_to_it() {
 fn an_open_with_no_url_is_not_a_request() {
     // Nothing to open, and answering `{ "opened": true }` for nothing would be
     // a lie the plugin could not detect.
-    assert_eq!(DialogRequest::parse(&json!({ "kind": "openExternal" })), None);
+    assert_eq!(
+        DialogRequest::parse(&json!({ "kind": "openExternal" })),
+        None
+    );
 }
 
 #[test]

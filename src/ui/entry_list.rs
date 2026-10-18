@@ -25,7 +25,7 @@ use crate::models::View;
 use crate::snapshot::{EntryRow, Selection, Snapshot};
 use crate::worker::Command;
 
-use super::{Action, Dispatch};
+use super::{Action, Dispatch, picture};
 
 // The focus handle the article list listens on.
 //
@@ -728,12 +728,8 @@ fn pictures(entries: &[EntryRow], snapshot: &Snapshot, dispatch: &Dispatch) -> A
     // Owned rather than borrowed: the list's render closure outlives this call
     // and runs on later frames. The same copy `articles` makes, and just as
     // cheap — headlines and image URLs, not the images.
-    let rows: Rc<Vec<Vec<EntryRow>>> = Rc::new(
-        entries
-            .chunks(COLUMNS)
-            .map(<[EntryRow]>::to_vec)
-            .collect(),
-    );
+    let rows: Rc<Vec<Vec<EntryRow>>> =
+        Rc::new(entries.chunks(COLUMNS).map(<[EntryRow]>::to_vec).collect());
     let count = rows.len();
 
     let cell_rows = rows.clone();
@@ -774,12 +770,7 @@ fn pictures(entries: &[EntryRow], snapshot: &Snapshot, dispatch: &Dispatch) -> A
 }
 
 /// One picture, as a tile.
-fn picture_cell(
-    entry: &EntryRow,
-    selected: bool,
-    dispatch: &Dispatch,
-    cx: &App,
-) -> AnyElement {
+fn picture_cell(entry: &EntryRow, selected: bool, dispatch: &Dispatch, cx: &App) -> AnyElement {
     let dispatch = dispatch.clone();
     let id = entry.id;
 
@@ -791,11 +782,7 @@ fn picture_cell(
             .rounded_sm()
             .overflow_hidden()
             .bg(cx.theme().muted)
-            .child(
-                gpui_kit::img(image.clone())
-                    .size_full()
-                    .object_fit(gpui_kit::ObjectFit::Cover),
-            )
+            .child(picture::tile(image.clone(), cx))
             .into_any_element(),
         // See the note on `pictures`: an entry with no image is still an
         // entry, and a tile that says so is the honest way to keep it

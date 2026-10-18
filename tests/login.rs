@@ -42,7 +42,10 @@ fn every_collected_cookie_is_a_domain_cookie() {
         let cookie = Cookie::build(("session", "abc")).domain(domain).build();
         let jar = jar_cookie(&cookie).expect("a cookie with a name and a domain");
 
-        assert!(!jar.host_only, "{domain} should be stored as a domain cookie");
+        assert!(
+            !jar.host_only,
+            "{domain} should be stored as a domain cookie"
+        );
     }
 }
 

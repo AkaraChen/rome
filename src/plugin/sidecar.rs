@@ -240,7 +240,8 @@ impl Sidecar {
 
             match received {
                 Ok(Ok(line)) => {
-                    if let Some(result) = self.dispatch(&line, id, method, &mut handler, &mut deadline)?
+                    if let Some(result) =
+                        self.dispatch(&line, id, method, &mut handler, &mut deadline)?
                     {
                         return Ok(result);
                     }
@@ -345,7 +346,10 @@ impl Sidecar {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("the plugin gave no message");
-            return Err(self.failed(io::ErrorKind::Other, format!("`{method}` failed: {message}")));
+            return Err(self.failed(
+                io::ErrorKind::Other,
+                format!("`{method}` failed: {message}"),
+            ));
         }
 
         // A response with neither field is malformed, but an empty result is
@@ -505,7 +509,12 @@ fn vendored_runtime() -> io::Result<PathBuf> {
         .into_iter()
         .flatten()
         .flatten()
-        .map(|entry| (entry.file_name().to_string_lossy().into_owned(), entry.path().join(TJS_FILE)))
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.path().join(TJS_FILE),
+            )
+        })
         .filter(|(_, binary)| binary.is_file())
         .collect();
     found.sort();
@@ -677,23 +686,26 @@ mod tests {
         ))
         .expect("the fake runtime should start");
 
-        let params = json!({ "settings": { "token": "x" }, "params": { "board": "rust" }, "cursor": null });
+        let params =
+            json!({ "settings": { "token": "x" }, "params": { "board": "rust" }, "cursor": null });
         let echoed = sidecar
             .call("fetch", params.clone(), |_| Ok(Value::Null))
             .expect("the call should succeed");
 
         // The script echoes back the exact line it read, so this is the wire
         // form and not a reconstruction of it.
-        assert_eq!(echoed, json!({ "id": 1, "method": "fetch", "params": params }));
+        assert_eq!(
+            echoed,
+            json!({ "id": 1, "method": "fetch", "params": params })
+        );
     }
 
     /// A plugin that never answers is killed at the deadline rather than
     /// hanging the caller.
     #[test]
     fn a_plugin_that_never_answers_is_killed() {
-        let mut sidecar =
-            Sidecar::spawn_command(fake_runtime("read -r request\nexec sleep 30\n"))
-                .expect("the fake runtime should start");
+        let mut sidecar = Sidecar::spawn_command(fake_runtime("read -r request\nexec sleep 30\n"))
+            .expect("the fake runtime should start");
         sidecar.set_timeout(Duration::from_millis(150));
 
         let started = Instant::now();
@@ -793,7 +805,9 @@ printf '{"id":1,"result":%s}\n' "$reply"
         sidecar.set_timeout(Duration::from_secs(10));
 
         let result = sidecar
-            .call("fetch", json!({}), |_| Err("no window to show a dialog in".into()))
+            .call("fetch", json!({}), |_| {
+                Err("no window to show a dialog in".into())
+            })
             .expect("the call itself still succeeds");
 
         // The reply the plugin received, reported back as its own result.

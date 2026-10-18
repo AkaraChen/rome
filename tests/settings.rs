@@ -107,7 +107,8 @@ fn a_preference_comes_back_as_it_was_written() {
 fn writing_a_preference_twice_replaces_it() {
     let mut scratch = Scratch::new("replace");
 
-    store::setting_set(&mut scratch.db, view_order::KEY, json!(["pictures"])).expect("write failed");
+    store::setting_set(&mut scratch.db, view_order::KEY, json!(["pictures"]))
+        .expect("write failed");
     store::setting_set(&mut scratch.db, view_order::KEY, json!(["videos"])).expect("write failed");
 
     // One row, not two: the key is unique, and a second write is an update
@@ -122,7 +123,8 @@ fn writing_a_preference_twice_replaces_it() {
 fn preferences_are_kept_apart_by_key() {
     let mut scratch = Scratch::new("keys");
 
-    store::setting_set(&mut scratch.db, view_order::KEY, json!(["pictures"])).expect("write failed");
+    store::setting_set(&mut scratch.db, view_order::KEY, json!(["pictures"]))
+        .expect("write failed");
     store::setting_set(&mut scratch.db, "something_else", json!(7)).expect("write failed");
 
     assert_eq!(
@@ -161,11 +163,15 @@ fn a_reordered_sidebar_is_still_reordered_after_a_restart() {
 
     assert_eq!(view_order::resolve(stored.as_ref()), after);
     assert_eq!(
-        after
-            .iter()
-            .map(|view| view.name())
-            .collect::<Vec<_>>(),
-        ["articles", "pictures", "social", "videos", "audios", "notifications"]
+        after.iter().map(|view| view.name()).collect::<Vec<_>>(),
+        [
+            "articles",
+            "pictures",
+            "social",
+            "videos",
+            "audios",
+            "notifications"
+        ]
     );
 }
 
@@ -177,7 +183,8 @@ fn a_restart_still_draws_every_row_when_the_stored_order_is_stale() {
     // chose the order of must not move.
     let mut scratch = Scratch::new("stale");
 
-    store::setting_set(&mut scratch.db, view_order::KEY, json!(["pictures"])).expect("write failed");
+    store::setting_set(&mut scratch.db, view_order::KEY, json!(["pictures"]))
+        .expect("write failed");
 
     scratch.reopen();
 

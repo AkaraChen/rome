@@ -21,7 +21,9 @@ use serde_json::Value;
 use crate::snapshot::Snapshot;
 use crate::worker::{Command, Event, Worker};
 
-use super::{Action, Dispatch, add_source, dialog, entry_list, lists, plugins, reading_pane, sidebar};
+use super::{
+    Action, Dispatch, add_source, dialog, entry_list, lists, plugins, reading_pane, sidebar,
+};
 
 /// Which content the middle and right columns are showing.
 ///
@@ -260,7 +262,9 @@ impl RomeApp {
                 // list is a grouping, and the entries belong to their source.
                 dialog::confirm(
                     "删除列表",
-                    &format!("「{name}」会从侧边栏消失。里面的条目不会被删，只是不再属于这个列表。"),
+                    &format!(
+                        "「{name}」会从侧边栏消失。里面的条目不会被删，只是不再属于这个列表。"
+                    ),
                     "删除",
                     Rc::new(move |_, _| worker.send(Command::DeleteList(id))),
                     window,

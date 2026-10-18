@@ -30,13 +30,13 @@
 //! `current_headless_renderer` returns `None` off macOS and Linux.
 
 use std::path::PathBuf;
-use std::time::Duration;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::assets::Assets;
-use gpui_kit::component::theme::ThemeMode;
 use gpui_kit::component::Theme;
+use gpui_kit::component::theme::ThemeMode;
 use gpui_kit_phosphor::PhosphorAssets;
 use serde_json::json;
 
@@ -220,7 +220,14 @@ fn fixture() -> Snapshot {
             source(3, 3, "知乎热榜", Some("中文"), 1, None),
             source(4, 4, "Hacker News", Some("英文"), 0, None),
             source(5, 5, "V2EX", Some("中文"), 1, None),
-            source(6, 6, "Lobsters", Some("英文"), 0, Some("上次抓取失败：unexpected token at line 1")),
+            source(
+                6,
+                6,
+                "Lobsters",
+                Some("英文"),
+                0,
+                Some("上次抓取失败：unexpected token at line 1"),
+            ),
         ],
         plugins: vec![
             PluginRow {
@@ -276,6 +283,7 @@ fn fixture() -> Snapshot {
             content: Some(LONG_BODY.to_owned()),
             summary: Some("从内存占用到打包体积。".to_owned()),
             article: Article::Idle,
+            preview: Article::Idle,
             image: Some("https://picsum.photos/seed/rome1/1200/600".to_owned()),
             source_title: "少数派".to_owned(),
             read: true,
@@ -324,6 +332,7 @@ fn open_article(article: Article) -> Snapshot {
         content: None,
         summary: Some("312 分 · 84 条评论".to_owned()),
         article,
+        preview: Article::Idle,
         image: None,
         source_title: "Hacker News".to_owned(),
         read: true,
@@ -509,6 +518,11 @@ fn shoot(name: &str, frame: Frame, snapshot: Snapshot, look: Look) -> bool {
     // `draw` catches it at the start of that: a surface at no opacity, halfway
     // off its resting position. The clock is simulated here, so the animation
     // is settled by advancing it rather than by waiting.
+    //
+    // Only for the overlays. A frame that settles runs the executor to a stop,
+    // and the worker is still starting up behind the first frame: what it
+    // publishes then belongs to the context that frame was built in, and using
+    // it after the next frame has opened is an error rather than a repaint.
     if look.overlay != Overlay::None {
         cx.advance_clock(Duration::from_millis(400));
         cx.run_until_parked();
@@ -649,7 +663,12 @@ fn main() {
             open_article(Article::Read(FETCHED_ARTICLE.to_owned())),
             Look::LIGHT,
         ),
-        ("article-waiting", LAPTOP, open_article(Article::Reading), Look::LIGHT),
+        (
+            "article-waiting",
+            LAPTOP,
+            open_article(Article::Reading),
+            Look::LIGHT,
+        ),
         // The first launch, which is the state most users see first and the one
         // most likely to be left undesigned.
         ("empty", LAPTOP, Snapshot::default(), Look::LIGHT),

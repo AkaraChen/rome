@@ -82,7 +82,9 @@ pub enum Command {
     RefreshAll,
 
     /// Read a plugin's manifest out of a `.js` file without installing it.
-    Describe { path: PathBuf },
+    Describe {
+        path: PathBuf,
+    },
     /// Install the plugin in `path` and subscribe to it.
     Install {
         path: PathBuf,
@@ -91,9 +93,15 @@ pub enum Command {
         params: Value,
     },
     /// Switch a plugin on or off, running its lifecycle hook either way.
-    SetPluginEnabled { plugin_id: u64, enabled: bool },
+    SetPluginEnabled {
+        plugin_id: u64,
+        enabled: bool,
+    },
     /// Switch one source on or off.
-    SetSourceEnabled { source_id: u64, enabled: bool },
+    SetSourceEnabled {
+        source_id: u64,
+        enabled: bool,
+    },
     /// Change what a source reads, and what it is called.
     SetSourceParams {
         source_id: u64,
@@ -104,7 +112,10 @@ pub enum Command {
     ///
     /// Applied on the plugin's next run: settings are handed to it on every
     /// call, so there is nothing cached to invalidate.
-    SetPluginSettings { plugin_id: u64, settings: Value },
+    SetPluginSettings {
+        plugin_id: u64,
+        settings: Value,
+    },
     /// Forget a source and everything it fetched.
     DeleteSource(u64),
     /// Forget a plugin, its sources, its entries and its storage.
@@ -114,23 +125,41 @@ pub enum Command {
     /// rather than duplicated.
     CreateList(String),
     /// Give a list a new name.
-    RenameList { list_id: u64, name: String },
+    RenameList {
+        list_id: u64,
+        name: String,
+    },
     /// Throw a list away. The entries that were in it stay.
     DeleteList(u64),
     /// Put an entry in a list.
-    AddToList { list_id: u64, entry_id: u64 },
+    AddToList {
+        list_id: u64,
+        entry_id: u64,
+    },
     /// Put an entry in the list called `name`, making it if it does not exist.
     ///
     /// One command rather than "create a list, then add to it" because that is
     /// one thing the user did: they typed a name and pressed a button. The
     /// alternative needs the new list's id, which only exists after the next
     /// snapshot comes back.
-    FileInto { name: String, entry_id: u64 },
+    FileInto {
+        name: String,
+        entry_id: u64,
+    },
     /// Take an entry out of a list.
-    RemoveFromList { list_id: u64, entry_id: u64 },
+    RemoveFromList {
+        list_id: u64,
+        entry_id: u64,
+    },
 
-    SetRead { entry_id: u64, read: bool },
-    SetStarred { entry_id: u64, starred: bool },
+    SetRead {
+        entry_id: u64,
+        read: bool,
+    },
+    SetStarred {
+        entry_id: u64,
+        starred: bool,
+    },
 
     /// Move a view row `delta` places in the sidebar: `-1` up, `1` down.
     ///
@@ -138,7 +167,10 @@ pub enum Command {
     /// send back a list it would first have to have been given — and so two
     /// moves that arrive together cannot leave the two sides disagreeing about
     /// what the order was. Off either end, this does nothing.
-    MoveView { view: View, delta: i32 },
+    MoveView {
+        view: View,
+        delta: i32,
+    },
 
     /// Stop the thread.
     Shutdown,
@@ -154,7 +186,10 @@ pub enum Event {
     /// The path comes back with it so the UI can send it straight back to
     /// [`Command::Install`] without having to remember which file it asked
     /// about.
-    Manifest { path: PathBuf, manifest: Box<Manifest> },
+    Manifest {
+        path: PathBuf,
+        manifest: Box<Manifest>,
+    },
     /// The worker is blocked until the user answers this.
     Ask(Ask),
     /// A plugin asked to say something. Nothing is waiting on it.
@@ -304,6 +339,22 @@ struct State {
     error: Option<String>,
 }
 
+/// What still has to be fetched for an entry that was just opened.
+///
+/// One decision per open, made when the entry is read out of the store, so the
+/// two ways of getting a body cannot both run: the plugin's page and the host's
+/// reading of the URL are alternatives, not a sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Page {
+    /// Nothing: the entry brought its own body.
+    Nothing,
+    /// The plugin's own page for the item. It exports a `preview` hook and has
+    /// not been asked for this entry yet.
+    Preview,
+    /// The page behind the entry's URL, for the host to read and strip.
+    Article,
+}
+
 impl State {
     fn open(path: PathBuf, migrations: &'static MigrationSet) -> Result<Self, String> {
         let db = Database::open(&path).map_err(|error| format!("打不开数据库：{error}"))?;
@@ -338,21 +389,28 @@ impl State {
 
             Command::Open(id) => {
                 let opened = id.and_then(|id| self.open_entry(id));
-                let wanted = opened.as_ref().is_some_and(|(_, wanted)| *wanted);
+                let page = opened.as_ref().map_or(Page::Nothing, |(_, page)| *page);
 
                 self.open = opened.map(|(entry, _)| entry);
 
-                if wanted {
-                    // The entry goes on screen before its page is read, so a
+                if let Page::Preview | Page::Article = page {
+                    // The entry goes on screen before its page is fetched, so a
                     // site that takes ten seconds to answer shows as a line
                     // saying the page is being read rather than as the entry
                     // that was open a moment ago.
                     if let Some(open) = &mut self.open {
-                        open.article = Article::Reading;
+                        match page {
+                            Page::Preview => open.preview = Article::Reading,
+                            _ => open.article = Article::Reading,
+                        }
                     }
 
                     self.publish(events);
-                    self.read_open_article();
+
+                    match page {
+                        Page::Preview => self.read_open_preview(),
+                        _ => self.read_open_article(),
+                    }
                 }
             }
 
@@ -366,24 +424,23 @@ impl State {
                 self.publish(events);
                 // A source's own failure is recorded on the source and shown on
                 // its sidebar row, so it is deliberately not repeated here.
-                let _ = session::refresh_source(&mut self.db, &mut self.http, source_id, Some(events));
+                let _ =
+                    session::refresh_source(&mut self.db, &mut self.http, source_id, Some(events));
                 self.busy = None;
             }
 
             Command::RefreshAll => self.refresh_everything(events),
 
-            Command::Describe { path } => {
-                match read_and_describe(&path) {
-                    Ok(manifest) => {
-                        let _ = events.send(Event::Manifest {
-                            path,
-                            manifest: Box::new(manifest),
-                        });
-                        return;
-                    }
-                    Err(message) => self.error = Some(message),
+            Command::Describe { path } => match read_and_describe(&path) {
+                Ok(manifest) => {
+                    let _ = events.send(Event::Manifest {
+                        path,
+                        manifest: Box::new(manifest),
+                    });
+                    return;
                 }
-            }
+                Err(message) => self.error = Some(message),
+            },
 
             Command::Install {
                 path,
@@ -560,11 +617,14 @@ impl State {
                 // touch the sidebar.
                 match store::setting_get(&mut self.db, view_order::KEY) {
                     Ok(stored) => {
-                        let order = view_order::moved(&view_order::resolve(stored.as_ref()), view, delta);
+                        let order =
+                            view_order::moved(&view_order::resolve(stored.as_ref()), view, delta);
 
-                        if let Err(error) =
-                            store::setting_set(&mut self.db, view_order::KEY, view_order::encode(&order))
-                        {
+                        if let Err(error) = store::setting_set(
+                            &mut self.db,
+                            view_order::KEY,
+                            view_order::encode(&order),
+                        ) {
                             self.error = Some(error.to_string());
                         }
                     }
@@ -632,16 +692,18 @@ impl State {
     /// [`State::read_open_article`]'s question. It is answered here because
     /// this is where the row is in hand; the answer is not part of the entry
     /// the pane draws.
-    fn open_entry(&mut self, entry_id: u64) -> Option<(EntryDetail, bool)> {
+    fn open_entry(&mut self, entry_id: u64) -> Option<(EntryDetail, Page)> {
         if let Err(error) = store::set_read(&mut self.db, entry_id, true) {
             self.error = Some(error.to_string());
         }
 
         let entry = store::entry(&mut self.db, entry_id).ok()?;
 
-        let source_title = store::source(&mut self.db, entry.source_id)
-            .map(|source| source.title)
-            .unwrap_or_default();
+        let source = store::source(&mut self.db, entry.source_id).ok()?;
+        let source_title = source.title;
+        let plugin_preview = store::plugin(&mut self.db, source.plugin_id)
+            .map(|plugin| plugin.has_preview)
+            .unwrap_or(false);
 
         // A plugin that returned a body has already said what the entry is,
         // and the host has no business fetching a page to replace it with.
@@ -652,8 +714,22 @@ impl State {
             .as_deref()
             .is_some_and(|content| !content.trim().is_empty());
 
-        let wanted =
-            !plugin_body && entry.article.is_none() && entry.article_at.is_none() && entry.url.is_some();
+        // The plugin's own page first, because it knows what the item is. The
+        // host only knows where it lives, and reads whatever HTML is served at
+        // that address — which for a video, a login wall or a JavaScript shell
+        // is nothing at all. Falling back to the address is what happens when
+        // the plugin has no preview hook, not when it has one that failed.
+        let page = if plugin_preview && entry.preview.is_none() && entry.preview_at.is_none() {
+            Page::Preview
+        } else if !plugin_body
+            && entry.article.is_none()
+            && entry.article_at.is_none()
+            && entry.url.is_some()
+        {
+            Page::Article
+        } else {
+            Page::Nothing
+        };
 
         let detail = EntryDetail {
             id: entry.id,
@@ -664,13 +740,50 @@ impl State {
             content: entry.content,
             summary: entry.summary,
             article: entry.article.map_or(Article::Idle, Article::Read),
+            preview: entry.preview.map_or(Article::Idle, Article::Read),
             image: entry.image,
             source_title,
             read: true,
             starred: entry.starred,
         };
 
-        Some((detail, wanted))
+        Some((detail, page))
+    }
+
+    /// Ask the open entry's plugin to draw its page, and put what it drew in
+    /// the pane.
+    ///
+    /// Blocks for as long as the plugin runs — a JavaScript runtime to start,
+    /// a request or two inside it — the same way a refresh does, and with the
+    /// same consequence: the window keeps drawing the snapshot published before
+    /// this was called.
+    ///
+    /// A run that failed leaves `preview_at` unset, so opening the entry again
+    /// asks again; one that succeeded records the attempt even if the plugin
+    /// had nothing to draw, so a video whose page turns out to be empty is not
+    /// asked for on every click.
+    fn read_open_preview(&mut self) {
+        let Some(open) = &self.open else {
+            return;
+        };
+
+        let entry_id = open.id;
+
+        let preview = match session::preview_entry(&mut self.db, &mut self.http, None, entry_id) {
+            Ok(preview) => preview.map_or(Article::Idle, Article::Read),
+            // As with the host's own read, the reason is not shown: the pane's
+            // line says the page could not be read and that opening the entry
+            // again will try, which is everything the reader can act on.
+            Err(_) => Article::Failed,
+        };
+
+        // Only if the reader has not moved on, for the same reason as
+        // `read_open_article`.
+        if let Some(open) = &mut self.open
+            && open.id == entry_id
+        {
+            open.preview = preview;
+        }
     }
 
     /// Read the open entry's own page and put what it finds in the pane.
@@ -783,6 +896,7 @@ impl State {
                 settings,
                 settings_schema: manifest.settings.clone(),
                 params_schema: manifest.params.clone(),
+                has_preview: manifest.preview,
             },
         )
         .map_err(|error| format!("装不上：{error}"))?;
@@ -1113,11 +1227,7 @@ impl Dialogs for DialogBridge<'_> {
         let id = self.next_id;
         self.next_id += 1;
 
-        if self
-            .events
-            .send(Event::Ask(Ask { id, request }))
-            .is_err()
-        {
+        if self.events.send(Event::Ask(Ask { id, request })).is_err() {
             // The window is gone, so nobody will ever answer. The plugin gets a
             // "no" rather than hanging forever on a question with no asker.
             return Value::Null;

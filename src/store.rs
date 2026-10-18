@@ -36,6 +36,9 @@ pub struct NewEntry {
     pub content: Option<String>,
     pub summary: Option<String>,
     pub image: Option<String>,
+    /// The values the plugin wants handed back to its `preview` hook for this
+    /// item. See [`crate::models::Entry::params`].
+    pub params: Option<serde_json::Value>,
 }
 
 /// What one ingest did.
@@ -66,6 +69,9 @@ pub struct NewPlugin {
     /// without starting a JavaScript runtime to ask it again.
     pub settings_schema: serde_json::Value,
     pub params_schema: serde_json::Value,
+    /// Whether the plugin's module exports a `preview` hook. See
+    /// [`crate::models::Plugin::has_preview`].
+    pub has_preview: bool,
 }
 
 /// Install a plugin, or upgrade it in place if its id is already present.
@@ -100,6 +106,10 @@ pub fn install_plugin(db: &mut Database, plugin: NewPlugin) -> toasty::Result<Pl
                         // dialog that edits it.
                         settings_schema: plugin.settings_schema,
                         params_schema: plugin.params_schema,
+                        // Whether the hook exists moves with the code, like
+                        // the forms do: an upgrade that adds `preview` should
+                        // start using it without a reinstall.
+                        has_preview: plugin.has_preview,
                         updated_at: timestamp,
                     })
                     .exec(&mut *conn)
@@ -107,27 +117,30 @@ pub fn install_plugin(db: &mut Database, plugin: NewPlugin) -> toasty::Result<Pl
 
                     Ok(record)
                 }
-                None => toasty::create!(Plugin {
-                    plugin_id: plugin.plugin_id,
-                    name: plugin.name,
-                    version: plugin.version,
-                    api_version: plugin.api_version,
-                    description: plugin.description,
-                    icon: plugin.icon,
-                    default_view: plugin.default_view as i32,
-                    enabled: true,
-                    source_code: plugin.source_code,
-                    settings: plugin.settings,
-                    settings_schema: plugin.settings_schema,
-                    params_schema: plugin.params_schema,
-                    installed_at: timestamp,
-                    updated_at: timestamp,
-                    last_run_at: None,
-                    last_error: None,
-                    last_error_at: None,
-                })
-                .exec(&mut *conn)
-                .await,
+                None => {
+                    toasty::create!(Plugin {
+                        plugin_id: plugin.plugin_id,
+                        name: plugin.name,
+                        version: plugin.version,
+                        api_version: plugin.api_version,
+                        description: plugin.description,
+                        icon: plugin.icon,
+                        default_view: plugin.default_view as i32,
+                        enabled: true,
+                        has_preview: plugin.has_preview,
+                        source_code: plugin.source_code,
+                        settings: plugin.settings,
+                        settings_schema: plugin.settings_schema,
+                        params_schema: plugin.params_schema,
+                        installed_at: timestamp,
+                        updated_at: timestamp,
+                        last_run_at: None,
+                        last_error: None,
+                        last_error_at: None,
+                    })
+                    .exec(&mut *conn)
+                    .await
+                }
             }
         })
     })
@@ -142,17 +155,11 @@ pub fn plugin(db: &mut Database, plugin_id: u64) -> toasty::Result<Plugin> {
     db.run(move |conn| Box::pin(async move { Plugin::get_by_id(&mut *conn, &plugin_id).await }))
 }
 
-pub fn set_plugin_enabled(
-    db: &mut Database,
-    plugin_id: u64,
-    enabled: bool,
-) -> toasty::Result<()> {
+pub fn set_plugin_enabled(db: &mut Database, plugin_id: u64, enabled: bool) -> toasty::Result<()> {
     db.run(|conn| {
         Box::pin(async move {
             let mut plugin = Plugin::get_by_id(&mut *conn, &plugin_id).await?;
-            toasty::update!(plugin { enabled })
-                .exec(&mut *conn)
-                .await
+            toasty::update!(plugin { enabled }).exec(&mut *conn).await
         })
     })
 }
@@ -281,7 +288,11 @@ pub fn uninstall_plugin(db: &mut Database, plugin_id: u64) -> toasty::Result<()>
 /// the app has to say which list something went into.
 pub fn list_name(db: &mut Database, list_id: u64) -> toasty::Result<String> {
     db.run(move |conn| {
-        Box::pin(async move { List::get_by_id(&mut *conn, &list_id).await.map(|list| list.name) })
+        Box::pin(async move {
+            List::get_by_id(&mut *conn, &list_id)
+                .await
+                .map(|list| list.name)
+        })
     })
 }
 
@@ -373,6 +384,7 @@ pub fn ingest(
                         content: new.content.clone(),
                         summary: new.summary.clone(),
                         image: new.image.clone(),
+                        params: new.params.clone(),
                         read: false,
                         starred: false,
                     })
@@ -389,7 +401,8 @@ pub fn ingest(
                     || entry.published_at != new.published_at
                     || entry.content != new.content
                     || entry.summary != new.summary
-                    || entry.image != new.image;
+                    || entry.image != new.image
+                    || entry.params != new.params;
 
                 if !changed {
                     report.unchanged += 1;
@@ -404,6 +417,7 @@ pub fn ingest(
                     content: new.content.clone(),
                     summary: new.summary.clone(),
                     image: new.image.clone(),
+                    params: new.params.clone(),
                 })
                 .exec(&mut *conn)
                 .await?;
@@ -474,9 +488,7 @@ pub fn set_starred(db: &mut Database, entry_id: u64, starred: bool) -> toasty::R
     db.run(|conn| {
         Box::pin(async move {
             let mut entry = Entry::get_by_id(&mut *conn, &entry_id).await?;
-            toasty::update!(entry { starred })
-                .exec(&mut *conn)
-                .await
+            toasty::update!(entry { starred }).exec(&mut *conn).await
         })
     })
 }
@@ -500,6 +512,31 @@ pub fn set_article(
             toasty::update!(entry {
                 article,
                 article_at: Some(at),
+            })
+            .exec(&mut *conn)
+            .await
+        })
+    })
+}
+
+/// Store the page the plugin drew for an entry, and when it drew it.
+///
+/// The same shape as [`set_article`], and deliberately separate from it: the
+/// two are different provenances — one the plugin's, one the host's — and a
+/// refresh must not wipe either.
+pub fn set_preview(
+    db: &mut Database,
+    entry_id: u64,
+    preview: Option<String>,
+    at: i64,
+) -> toasty::Result<()> {
+    db.run(move |conn| {
+        Box::pin(async move {
+            let mut entry = Entry::get_by_id(&mut *conn, &entry_id).await?;
+
+            toasty::update!(entry {
+                preview,
+                preview_at: Some(at),
             })
             .exec(&mut *conn)
             .await
@@ -815,17 +852,16 @@ pub fn setting_get(db: &mut Database, key: &str) -> toasty::Result<Option<serde_
 /// Toasty's generated `upsert_by_*` wants the whole row including the auto id,
 /// and this is one indexed lookup against a local file, on a path the user
 /// takes by moving a row in the sidebar.
-pub fn setting_set(
-    db: &mut Database,
-    key: &str,
-    value: serde_json::Value,
-) -> toasty::Result<()> {
+pub fn setting_set(db: &mut Database, key: &str, value: serde_json::Value) -> toasty::Result<()> {
     let key = key.to_owned();
     let updated_at = now();
 
     db.run(move |conn| {
         Box::pin(async move {
-            let existing = Setting::filter_by_key(&key).first().exec(&mut *conn).await?;
+            let existing = Setting::filter_by_key(&key)
+                .first()
+                .exec(&mut *conn)
+                .await?;
 
             match existing {
                 Some(mut row) => {
@@ -929,10 +965,7 @@ pub fn entries_for(
 }
 
 /// The ids of the sources carrying `view`.
-async fn source_ids_with_view(
-    conn: &mut toasty::Db,
-    view: View,
-) -> toasty::Result<Vec<u64>> {
+async fn source_ids_with_view(conn: &mut toasty::Db, view: View) -> toasty::Result<Vec<u64>> {
     Ok(Source::all()
         .exec(&mut *conn)
         .await?
@@ -986,11 +1019,7 @@ pub fn search(db: &mut Database, query: &str, limit: usize) -> toasty::Result<Ve
 /// A source is a subscription, so this is the user saying "stop fetching this
 /// one" without losing its parameters or its entries — which is what deleting
 /// it would do.
-pub fn set_source_enabled(
-    db: &mut Database,
-    source_id: u64,
-    enabled: bool,
-) -> toasty::Result<()> {
+pub fn set_source_enabled(db: &mut Database, source_id: u64, enabled: bool) -> toasty::Result<()> {
     db.run(move |conn| {
         Box::pin(async move {
             let mut source = Source::get_by_id(&mut *conn, &source_id).await?;
@@ -1037,9 +1066,7 @@ pub fn set_plugin_settings(
     db.run(move |conn| {
         Box::pin(async move {
             let mut plugin = Plugin::get_by_id(&mut *conn, &plugin_id).await?;
-            toasty::update!(plugin { settings })
-                .exec(&mut *conn)
-                .await
+            toasty::update!(plugin { settings }).exec(&mut *conn).await
         })
     })
 }

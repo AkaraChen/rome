@@ -214,14 +214,11 @@ impl Render for SearchField {
         }
 
         div().px_3().pb_2().child(
-            Input::new(&self.input)
-                .small()
-                .cleanable(true)
-                .prefix(
-                    Icon::new(PhosphorIcon::MagnifyingGlass.regular())
-                        .size_3()
-                        .text_color(cx.theme().muted_foreground),
-                ),
+            Input::new(&self.input).small().cleanable(true).prefix(
+                Icon::new(PhosphorIcon::MagnifyingGlass.regular())
+                    .size_3()
+                    .text_color(cx.theme().muted_foreground),
+            ),
         )
     }
 }

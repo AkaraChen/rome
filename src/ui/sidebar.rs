@@ -26,12 +26,7 @@ use super::{Action, Dispatch};
 /// thing on this screen that is not a fact about the data. It lives in the
 /// window, because it is about this window — a reader who collapsed the sidebar
 /// to get a wider column did not ask for a setting.
-pub fn sidebar(
-    snapshot: &Snapshot,
-    collapsed: bool,
-    dispatch: &Dispatch,
-    cx: &App,
-) -> AnyElement {
+pub fn sidebar(snapshot: &Snapshot, collapsed: bool, dispatch: &Dispatch, cx: &App) -> AnyElement {
     // The tabs first: which list you are looking at is the question the sidebar
     // is answering, and everything below narrows that answer.
     let mut sections = vec![view_tabs(snapshot, dispatch)];
@@ -50,8 +45,11 @@ pub fn sidebar(
 
     for (category, sources) in by_category(&snapshot.sources) {
         sections.push(
-            SidebarGroup::new(category.unwrap_or("未分类"))
-                .children(sources.into_iter().map(|source| source_row(source, snapshot, dispatch))),
+            SidebarGroup::new(category.unwrap_or("未分类")).children(
+                sources
+                    .into_iter()
+                    .map(|source| source_row(source, snapshot, dispatch)),
+            ),
         );
     }
 
@@ -148,7 +146,11 @@ fn header(collapsed: bool, dispatch: &Dispatch) -> AnyElement {
         .ghost()
         .small()
         .icon(Icon::new(PhosphorIcon::SidebarSimple.regular()))
-        .tooltip(if collapsed { "展开侧栏" } else { "收起侧栏" })
+        .tooltip(if collapsed {
+            "展开侧栏"
+        } else {
+            "收起侧栏"
+        })
         .on_click(move |_, window, cx| toggle(Action::ToggleSidebar, window, cx));
 
     if collapsed {

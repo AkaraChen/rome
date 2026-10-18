@@ -110,6 +110,18 @@ pub struct Plugin {
 
     pub enabled: bool,
 
+    /// Whether the plugin exports a `preview` hook.
+    ///
+    /// Read off the module when the plugin is installed rather than asked for
+    /// in the manifest: whether a function exists is a fact, and a plugin
+    /// author who wrote it should not also have to remember to declare it.
+    ///
+    /// It is stored because opening an entry is a click, and starting a
+    /// JavaScript runtime to discover that there is no hook to run would put a
+    /// process launch between the click and the pane, on every entry of every
+    /// plugin that does not have one.
+    pub has_preview: bool,
+
     /// The plugin's JavaScript, kept in the database rather than referenced by
     /// path. Installing a plugin is then one row, and the app never depends on
     /// where the code came from or whether that file is still there.
@@ -229,6 +241,19 @@ pub struct Entry {
     pub summary: Option<String>,
     pub image: Option<String>,
 
+    /// What the plugin said to ask for this item's page by.
+    ///
+    /// A list is a shallow thing — a title, a thumbnail, an id — and the page
+    /// behind one usually needs that id and nothing else: a video's `bvid`, a
+    /// post's slug, a track's number. The plugin knows which, and it is the
+    /// only one that does, so it hands the values over here rather than
+    /// teaching the host to parse them back out of the URL.
+    ///
+    /// Opaque, like [`Source::params`]: only the plugin defines what is in it,
+    /// and it is handed back to the plugin's `preview` hook untouched.
+    #[column(type = text)]
+    pub params: Option<serde_json::Value>,
+
     /// The body of the entry's own page, read by the host.
     ///
     /// A column of its own rather than a second use of [`Entry::content`],
@@ -248,6 +273,27 @@ pub struct Entry {
     /// alone. It is deliberately *not* set when the fetch itself failed, so a
     /// site that was down is tried again next time the entry is opened.
     pub article_at: Option<i64>,
+
+    /// The item's page, rendered by the plugin that listed it.
+    ///
+    /// The other half of [`Entry::params`]. A plugin that knows what a video is
+    /// can ask its own API for the video and draw a page about it — the
+    /// description, the stats, the parts — where the host, given only a URL,
+    /// could at best strip the page's HTML and at worst be served a login wall.
+    /// This is that page, kept as HTML and drawn by the same block renderer as
+    /// everything else.
+    ///
+    /// A column of its own because [`Entry::content`] belongs to the plugin's
+    /// *fetch* and is rewritten on every refresh; a preview is made once, when
+    /// the entry is first opened, and a refresh must not take it away.
+    pub preview: Option<String>,
+
+    /// When the plugin's preview was made, whether or not it produced anything.
+    ///
+    /// The marker that stops the hook being run on every open. Not set when the
+    /// run itself failed, so a plugin that was offline is asked again next time
+    /// — the same rule as [`Entry::article_at`].
+    pub preview_at: Option<i64>,
 
     pub read: bool,
 

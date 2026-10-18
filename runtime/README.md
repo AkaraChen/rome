@@ -13,8 +13,8 @@ store, and a log.
 ```
 rome ──▶ tjs run runtime/harness.js /path/to/your-plugin.js
          │
-         ├── your module: meta, settings, fetch, activate, deactivate
-         └── ctx: { settings, params, cursor, fetch, storage, ui, log }
+         ├── your module: meta, settings, fetch, preview, activate, deactivate
+         └── ctx: { settings, params, cursor, item, fetch, storage, ui, log }
 ```
 
 ---
@@ -25,6 +25,7 @@ rome ──▶ tjs run runtime/harness.js /path/to/your-plugin.js
 export const meta = { ... };        // required
 export const settings = { ... };    // optional
 export async function fetch(ctx) {} // required
+export async function preview(ctx) {}    // optional
 export async function activate(ctx) {}   // optional
 export async function deactivate(ctx) {} // optional
 ```
@@ -93,6 +94,46 @@ Throwing is fine and expected. The error — message and stack — is shown agai
 which is the only thing that makes a broken plugin fixable. Never swallow an error to return
 an empty list: that hides the breakage and the source just looks empty forever.
 
+### `preview(ctx)` — optional
+
+Called when the reader **opens** one of your entries, and only then. Return that item's page
+as HTML, or `null` to leave the entry as it was.
+
+```js
+return "<p>…</p>";            // the page
+return { content: "<p>…</p>" }; // the same thing, with room to grow
+return null;                   // nothing to add
+```
+
+This is the hook for what a list cannot show. A ranking knows a video's id and its cover; the
+page behind it needs a second request, to an endpoint that takes that id. Give every entry a
+`params` object in `fetch` with whatever that request needs, and `preview` gets it back as
+`ctx.item.params`, on the entry it belongs to:
+
+```js
+// in fetch
+params: { bvid: video.bvid }
+
+// later, when that entry is opened
+export async function preview(ctx) {
+    const { bvid } = ctx.item.params;
+    const response = await ctx.fetch(`https://example.com/api/view?bvid=${bvid}`);
+    const video = (await response.json()).data;
+
+    return { content: `<h2>简介</h2><p>${video.desc}</p>` };
+}
+```
+
+The HTML goes through the same block renderer as every other body: headings, paragraphs, lists,
+quotes, code, images, links. Do not return a whole document — `<html>`, `<head>`, `<script>`
+and friends are dropped, and there is no CSS. The typography is the app's, so escape the text
+you interpolate: a description containing `<` is a `<`, not a tag.
+
+The result is stored with the entry, so the page is drawn once and read from the database after
+that. A hook that throws is shown as a line saying the detail could not be read, and opening the
+entry again retries. A hook that returns `null` has answered, and is not asked again for that
+entry.
+
 ### Lifecycle hooks — optional
 
 `activate(ctx)` runs when the user enables the plugin or the source; `deactivate(ctx)` when
@@ -115,6 +156,7 @@ clearing timers. Do not fetch entries here — that is `fetch`'s job, and Rome d
     content: "<p>…</p>",       // optional, the full body, HTML or text
     summary: "412 points · 87 comments", // optional, one line, shown in lists
     image: "https://…",        // optional, absolute URL
+    params: { bvid: "BV1…" },  // optional, handed back to `preview` for this item
 }
 ```
 
@@ -161,6 +203,7 @@ Every call gets a fresh `ctx`.
 | `ctx.settings` | the values the user set, keyed by your `settings` schema |
 | `ctx.params` | this source's parameters — the same plugin can back many sources |
 | `ctx.cursor` | the cursor from the previous `fetch`, or `null` on the first call |
+| `ctx.item` | inside `preview`, the entry being opened — `{ id, title, url, params }`; `null` everywhere else |
 | `ctx.fetch` | `fetch`, but through the host |
 | `ctx.storage` | your plugin's key/value store |
 | `ctx.ui` | dialogs, progress, opening a browser and the login window, plus `alert`/`confirm`/`prompt` as globals |

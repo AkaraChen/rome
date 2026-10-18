@@ -315,15 +315,13 @@ pub fn open(ask: Ask, worker: Worker, window: &mut Window, cx: &mut App) {
                     // button relying on it would leave the plugin waiting for
                     // an answer that never came.
                     .footer(DialogFooter::new().child(
-                        Button::new("pick-cancel")
-                            .label("取消")
-                            .on_click({
-                                let cancel = cancel.clone();
-                                move |_, window, cx| {
-                                    cancel.answer(id, Value::Null);
-                                    window.close_dialog(cx);
-                                }
-                            }),
+                        Button::new("pick-cancel").label("取消").on_click({
+                            let cancel = cancel.clone();
+                            move |_, window, cx| {
+                                cancel.answer(id, Value::Null);
+                                window.close_dialog(cx);
+                            }
+                        }),
                     ))
                     // Dismissed without choosing. The plugin gets "nothing was
                     // picked", which it already has to handle for the case
