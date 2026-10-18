@@ -20,7 +20,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_kit_phosphor::PhosphorIcon;
 
-use crate::snapshot::{Article, EntryDetail, Snapshot};
+use crate::snapshot::{Body, EntryDetail, Snapshot};
 use crate::worker::Command;
 
 use super::content::{self, Link, Parsed};
@@ -154,17 +154,15 @@ fn selected_source(snapshot: &Snapshot) -> u64 {
 
 /// The HTML the body should be drawn from.
 ///
-/// Four sources, in order of how much they are the entry rather than a note
+/// Three sources, in order of how much they are the entry rather than a note
 /// about it. The plugin's own page for the item is the best thing the app can
 /// have: it was made by the code that listed the item, from the item's own
 /// parameters, and it is the only source that knows what the item *is*. What
-/// the plugin said in the list comes next. The article is what the host read
-/// off the page the entry points at, which is the only body a link aggregator
-/// will ever have. The summary is what is left — for Hacker News that is a
-/// score and a comment count, which is not a body at all but is better than an
-/// empty pane, which would look like a bug.
+/// the plugin said in the list comes next. The summary is what is left — for an
+/// aggregator that is a score and a comment count, which is not a body at all
+/// but is better than an empty pane, which would look like a bug.
 fn body_html(entry: &EntryDetail) -> &str {
-    if let Article::Read(page) = &entry.preview {
+    if let Body::Read(page) = &entry.preview {
         return page;
     }
 
@@ -172,10 +170,6 @@ fn body_html(entry: &EntryDetail) -> &str {
         .content
         .as_deref()
         .filter(|content| !content.trim().is_empty())
-        .or(match &entry.article {
-            Article::Read(article) => Some(article.as_str()),
-            _ => None,
-        })
         .or(entry.summary.as_deref())
         .unwrap_or_default()
 }
@@ -400,16 +394,14 @@ fn body(entry: &EntryDetail, parsed: &Parsed, cx: &App) -> AnyElement {
         column.push(picture::hero(url, cx));
     }
 
-    // What the host or the plugin is doing about the entry's own page, when it
-    // is doing something. Without this an aggregator's entry is one line of
-    // metadata and looks like a story that turned out to be a sentence long,
-    // and a page that could not be read looks like a page that had nothing in
-    // it.
-    let waiting = match (&entry.preview, &entry.article) {
-        (Article::Reading, _) => Some("正在读取详情…"),
-        (Article::Failed, _) => Some("详情没能读到，下次打开再试"),
-        (_, Article::Reading) => Some("正在读取原文…"),
-        (_, Article::Failed) => Some("没能读到原文，下次打开再试"),
+    // What the plugin is doing about the entry's own page, when it is doing
+    // something. Without this an entry whose plugin is drawing a page is one
+    // line of metadata and looks like a story that turned out to be a sentence
+    // long, and a page that could not be drawn looks like a page that had
+    // nothing in it.
+    let waiting = match &entry.preview {
+        Body::Reading => Some("正在读取详情…"),
+        Body::Failed => Some("详情没能读到，下次打开再试"),
         _ => None,
     };
 

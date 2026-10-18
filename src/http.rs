@@ -197,11 +197,12 @@ fn causes(error: &(dyn std::error::Error + 'static)) -> String {
 /// One request the host made on a plugin's behalf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestLog {
-    /// The plugin this request was made for, or `None` for a request the host
-    /// made for itself. This is what the log is for: a plugin's trust story is
-    /// "here is every domain it reached", and a log without the owner can only
-    /// say that a fetch happened.
-    pub plugin: Option<u64>,
+    /// The plugin this request was made for.
+    ///
+    /// The host makes no requests of its own: every line in this log belongs to
+    /// a plugin, which is what makes the log a trust record — "here is every
+    /// domain this plugin reached" — rather than a record of what the app did.
+    pub plugin: u64,
     pub method: String,
     pub url: String,
     /// The status the server answered with, or `None` if the request never
@@ -272,13 +273,14 @@ impl Http {
     /// and written after it, both inside the same trip through the runtime that
     /// drives the request itself.
     ///
-    /// `plugin` is only for the log — it is what makes the log answer "which
-    /// domains has *this* plugin touched" rather than "what has been fetched".
-    /// `None` is for a request the host made for itself.
+    /// `plugin` is the owner of the request — the one that asked for it — and
+    /// it is what makes the log answer "which domains has *this* plugin
+    /// touched" rather than "what has been fetched". There is no `None`: the
+    /// host does not go to the network for itself.
     pub fn request(
         &mut self,
         db: &mut Database,
-        plugin: Option<u64>,
+        plugin: u64,
         url: &str,
         init: RequestInit,
     ) -> Result<HttpResponse, HttpError> {
@@ -334,7 +336,7 @@ pub fn recent_domains(log: &VecDeque<RequestLog>, plugin: u64, limit: usize) -> 
             break;
         }
 
-        if entry.plugin != Some(plugin) {
+        if entry.plugin != plugin {
             continue;
         }
 

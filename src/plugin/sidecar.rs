@@ -357,6 +357,19 @@ impl Sidecar {
         Ok(Some(value.get("result").cloned().unwrap_or(Value::Null)))
     }
 
+    /// Whether the child is still running and able to take another call.
+    ///
+    /// `exited` only records the deaths this side caused. A child that left on
+    /// its own is not noticed until something reads the end of its stdout, so
+    /// this asks the operating system instead of trusting the flag.
+    pub fn alive(&mut self) -> bool {
+        if self.exited {
+            return false;
+        }
+
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
     /// Write one protocol object to the child.
     fn send(&mut self, value: &Value) -> io::Result<()> {
         let line = match serde_json::to_string(value) {

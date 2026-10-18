@@ -16,7 +16,7 @@
 export const meta = {
   id: 'rome.lobsters',
   name: 'Lobsters',
-  version: '1.0.0',
+  version: '1.1.0',
   apiVersion: '1',
   view: 'articles',
   description: 'Lobsters 技术社区的热门故事',
@@ -100,4 +100,20 @@ export async function fetch(ctx) {
   ctx.log.info(`lobsters: ${entries.length} 条`)
 
   return { entries }
+}
+
+/// The story's own page, read through the host's extractor.
+///
+/// Lobsters links out to articles; a text-only post's `url` is its own story
+/// page. Both are pages, and `ctx.article` strips either down to what a reader
+/// wants. The request is this plugin's, made under its own id — the host does
+/// not fetch an entry's page unless the plugin asks.
+export async function preview(ctx) {
+  const url = ctx.item?.url
+
+  if (!url) return null
+
+  const content = await ctx.article(url)
+
+  return content === null ? null : { content }
 }

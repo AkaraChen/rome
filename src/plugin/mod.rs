@@ -32,6 +32,7 @@
 //!
 //! ```text
 //! http        {"url": "...", "init": {"method"?, "headers"?, "body"?}} -> {"status": <u16>, "headers": {...}, "body": "<string>"}
+//! article     {"url": "..."}                                           -> "<html>" | null
 //! ui          {"kind": "alert"|"confirm"|"prompt"|"notify"|"form"|"pick"|"login", ...} -> whatever the dialog returns
 //! storage.get {"key": "..."}                                           -> <any|null>
 //! storage.set {"key": "...", "value": <any>}                           -> null
@@ -54,6 +55,7 @@ pub mod method {
 
     // Plugin to host.
     pub const HTTP: &str = "http";
+    pub const ARTICLE: &str = "article";
     pub const UI: &str = "ui";
     pub const STORAGE_GET: &str = "storage.get";
     pub const STORAGE_SET: &str = "storage.set";

@@ -254,26 +254,6 @@ pub struct Entry {
     #[column(type = text)]
     pub params: Option<serde_json::Value>,
 
-    /// The body of the entry's own page, read by the host.
-    ///
-    /// A column of its own rather than a second use of [`Entry::content`],
-    /// which is what the plugin said and is rewritten from scratch on every
-    /// refresh: for the aggregators that need this — Hacker News knows a
-    /// story's title and address and nothing behind it — the plugin returns no
-    /// content at all, so a refresh would wipe the article straight back out.
-    /// Keeping the two apart also keeps the provenance honest: `content` is the
-    /// plugin's, this is the host's.
-    pub article: Option<String>,
-
-    /// When the host last read [`Entry::article`]'s page, whether or not there
-    /// was anything in it.
-    ///
-    /// The marker that stops a page being fetched again on every open. A page
-    /// with no article in it — a video, a login wall — is read once and left
-    /// alone. It is deliberately *not* set when the fetch itself failed, so a
-    /// site that was down is tried again next time the entry is opened.
-    pub article_at: Option<i64>,
-
     /// The item's page, rendered by the plugin that listed it.
     ///
     /// The other half of [`Entry::params`]. A plugin that knows what a video is
@@ -291,8 +271,7 @@ pub struct Entry {
     /// When the plugin's preview was made, whether or not it produced anything.
     ///
     /// The marker that stops the hook being run on every open. Not set when the
-    /// run itself failed, so a plugin that was offline is asked again next time
-    /// — the same rule as [`Entry::article_at`].
+    /// run itself failed, so a plugin that was offline is asked again next time.
     pub preview_at: Option<i64>,
 
     pub read: bool,

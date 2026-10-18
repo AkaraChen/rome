@@ -493,37 +493,16 @@ pub fn set_starred(db: &mut Database, entry_id: u64, starred: bool) -> toasty::R
     })
 }
 
-/// Record what the host found when it read an entry's own page.
-///
-/// `article_at` is written whether or not there was an article to write, which
-/// is what the two arguments are for: the timestamp is the record of the
-/// *attempt*, and a page with nothing to read is a page that should not be
-/// fetched again every time the reader opens the entry.
-pub fn set_article(
-    db: &mut Database,
-    entry_id: u64,
-    article: Option<String>,
-    at: i64,
-) -> toasty::Result<()> {
-    db.run(move |conn| {
-        Box::pin(async move {
-            let mut entry = Entry::get_by_id(&mut *conn, &entry_id).await?;
-
-            toasty::update!(entry {
-                article,
-                article_at: Some(at),
-            })
-            .exec(&mut *conn)
-            .await
-        })
-    })
-}
-
 /// Store the page the plugin drew for an entry, and when it drew it.
 ///
-/// The same shape as [`set_article`], and deliberately separate from it: the
-/// two are different provenances — one the plugin's, one the host's — and a
-/// refresh must not wipe either.
+/// A column of its own because [`Entry::content`] belongs to the plugin's
+/// *fetch* and is rewritten on every refresh; a preview is made once, when the
+/// entry is first opened, and a refresh must not take it away.
+///
+/// `preview_at` is written whether or not there was a page to write, which is
+/// what the two arguments are for: the timestamp is the record of the
+/// *attempt*, and an item the plugin has nothing to add for should not be
+/// asked about again every time the reader opens it.
 pub fn set_preview(
     db: &mut Database,
     entry_id: u64,

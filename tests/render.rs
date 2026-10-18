@@ -56,7 +56,7 @@ use gpui_kit::{
 use rome::models::View;
 use rome::plugin::DialogRequest;
 use rome::snapshot::{
-    Article, EntryDetail, EntryRow, ListRow, PluginRow, Selection, Snapshot, SourceRow, Tab,
+    Body, EntryDetail, EntryRow, ListRow, PluginRow, Selection, Snapshot, SourceRow, Tab,
 };
 use rome::ui::add_source;
 use rome::ui::app::RomeApp;
@@ -282,8 +282,7 @@ fn fixture() -> Snapshot {
             published_at: Some(now() - 3600 * 5),
             content: Some(LONG_BODY.to_owned()),
             summary: Some("从内存占用到打包体积。".to_owned()),
-            article: Article::Idle,
-            preview: Article::Idle,
+            preview: Body::Idle,
             image: Some("https://picsum.photos/seed/rome1/1200/600".to_owned()),
             source_title: "少数派".to_owned(),
             read: true,
@@ -295,12 +294,13 @@ fn fixture() -> Snapshot {
     }
 }
 
-/// What the extractor hands the pane: the page's article, furniture removed.
+/// What a plugin hands the pane: the item's page, drawn from the item's own
+/// parameters.
 ///
-/// The opening heading is the title again on purpose. A real page nearly always
+/// The opening heading is the title again on purpose. A page nearly always
 /// carries one, and the pane draws the title itself, so this is the frame that
 /// shows whether it draws the same words twice.
-const FETCHED_ARTICLE: &str = "\
+const DRAWN_PAGE: &str = "\
 <h1>Show HN: I built a local-first RSS reader</h1>\
 <p>I have been running this for about six months and finally feel like it is \
 worth showing. It is a native window, a SQLite file, and a handful of small \
@@ -314,13 +314,13 @@ arrived.</p>\
 <p>It is written in Rust and it has no server of its own. Everything is a file \
 on your disk, and a plugin is a script you can read.</p>";
 
-/// The reading pane on an entry the host had to read for itself.
+/// The reading pane on an entry whose plugin is drawing a page for it.
 ///
 /// Every link aggregator leaves `content` empty — Hacker News knows a story's
 /// title and its address and nothing behind it — so this is the state the
 /// reading pane is in for most of what a reader actually opens, and it is the
 /// one no other frame reaches.
-fn open_article(article: Article) -> Snapshot {
+fn open_preview(preview: Body) -> Snapshot {
     let mut snapshot = fixture();
 
     snapshot.open = Some(EntryDetail {
@@ -331,8 +331,7 @@ fn open_article(article: Article) -> Snapshot {
         published_at: Some(now() - 3600 * 2),
         content: None,
         summary: Some("312 分 · 84 条评论".to_owned()),
-        article,
-        preview: Article::Idle,
+        preview,
         image: None,
         source_title: "Hacker News".to_owned(),
         read: true,
@@ -653,20 +652,20 @@ fn main() {
         ("browse-small", SMALL, fixture(), Look::LIGHT),
         ("pictures", LAPTOP, pictures(), Look::LIGHT),
         ("collapsed", LAPTOP, fixture(), Look::NARROW),
-        // An entry whose body the host had to go and read, and the moment
-        // before it has come back. Both are states only a real fetch reaches:
-        // the first is what the feature is for, and the second is the one that
-        // would look like a bug if the waiting line were missing or misplaced.
+        // An entry whose page the plugin had to draw, and the moment before it
+        // has come back. Both are states only a real run reaches: the first is
+        // what the feature is for, and the second is the one that would look
+        // like a bug if the waiting line were missing or misplaced.
         (
-            "article-read",
+            "preview-read",
             LAPTOP,
-            open_article(Article::Read(FETCHED_ARTICLE.to_owned())),
+            open_preview(Body::Read(DRAWN_PAGE.to_owned())),
             Look::LIGHT,
         ),
         (
-            "article-waiting",
+            "preview-waiting",
             LAPTOP,
-            open_article(Article::Reading),
+            open_preview(Body::Reading),
             Look::LIGHT,
         ),
         // The first launch, which is the state most users see first and the one

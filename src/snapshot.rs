@@ -144,32 +144,30 @@ pub struct EntryRow {
     pub starred: bool,
 }
 
-/// What the host found when it read the entry's own page.
+/// The state of an entry's body that the entry's plugin has to draw.
 ///
-/// An enum rather than an `Option` and a flag, because the three states the
-/// reading pane has to tell apart are exclusive and one of them is a question
-/// rather than an answer: whether the page is being read right now decides
-/// whether the pane says so, and "no article yet" and "no article ever" look
-/// the same in the text and mean different things on screen.
+/// An enum rather than an `Option` and a flag, because the states the reading
+/// pane has to tell apart are exclusive and one of them is a question rather
+/// than an answer: whether the plugin is drawing the page right now decides
+/// whether the pane says so, and "nothing yet" and "nothing ever" look the same
+/// in the text and mean different things on screen.
 ///
-/// It only ever applies to entries a plugin left empty-handed, which is every
-/// link aggregator: Hacker News knows a story's title and its address, and
-/// nothing about what is behind it.
+/// The plugin's `preview` hook is the only writer. A listing knows what an item
+/// is; asking the item's own source for a page is the plugin's work, and the
+/// host does not fetch one on its own. An entry whose plugin has no hook is
+/// whatever the listing made it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum Article {
-    /// Nobody has read the page, and nobody is going to: the plugin supplied a
-    /// body of its own, the entry has no address, or the page has already been
-    /// read and had nothing in it.
+pub enum Body {
+    /// Nothing is being drawn and nothing will be: the plugin has no preview,
+    /// has not drawn one yet, or answered with nothing.
     #[default]
     Idle,
-    /// The host is reading it now. This is the one state the pane has to say
+    /// The plugin is drawing it now. This is the one state the pane has to say
     /// out loud, because the entry it is showing has no body in it yet.
     Reading,
-    /// What the page turned out to hold. Empty is a real answer — the fetch
-    /// succeeded and there was no article in it — and is not the same as
-    /// [`Article::Idle`], because the next open will not fetch it again.
+    /// What the plugin drew.
     Read(String),
-    /// The page could not be fetched. The next open tries again.
+    /// The plugin failed. The next open asks again.
     Failed,
 }
 
@@ -183,17 +181,8 @@ pub struct EntryDetail {
     pub published_at: Option<i64>,
     pub content: Option<String>,
     pub summary: Option<String>,
-    /// The body of the entry's own page, which the host read for the entries
-    /// whose plugin had none. See [`Article`].
-    pub article: Article,
-    /// The page the entry's own plugin drew for it, when it exports a
-    /// `preview` hook. See [`Article`].
-    ///
-    /// Separate from [`EntryDetail::article`] because it is a different
-    /// provenance: the plugin knows what the item is and can ask its own API,
-    /// where the host only had a URL to fetch and strip. Exactly one of the
-    /// two is ever `Reading` or `Read`.
-    pub preview: Article,
+    /// The page the entry's own plugin drew for it. See [`Body`].
+    pub preview: Body,
     /// The picture the feed attached to this entry, if any.
     ///
     /// Carried separately from the content because it is the article's hero:

@@ -1,12 +1,10 @@
-//! The bodies an entry gains after it was listed, against a real database.
+//! The page a plugin draws for an entry, against a real database.
 //!
-//! Two of them, from two sides: the article the host reads off the entry's URL,
-//! and the page the plugin draws from the item's own parameters. The extraction
-//! and the rendering are tested where they live; what these cover is the other
-//! half of both features — that each lands in a column of its own, that a
-//! refresh cannot wipe either, and that an attempt which found nothing is still
-//! recorded. All three are properties of the schema and the writes rather than
-//! of any function, so a database is what it takes.
+//! Three properties, all of them properties of the schema and the writes rather
+//! than of any function: the parameters a listing attached survive ingest
+//! untouched, what the plugin drew is stored against the entry with the moment
+//! it drew it, and a refresh — which rewrites `content` from the listing —
+//! cannot take either away. A database is what it takes to see them.
 
 use std::path::PathBuf;
 
@@ -27,7 +25,7 @@ struct Scratch {
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("rome-article-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rome-preview-{}-{name}", std::process::id()));
 
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("could not make a scratch directory");
@@ -88,83 +86,6 @@ impl Drop for Scratch {
 }
 
 #[test]
-fn what_the_host_read_is_stored_with_when_it_read_it() {
-    let mut scratch = Scratch::new("stores");
-    let source = scratch.source();
-    let entry = scratch.entry(source);
-
-    store::set_article(
-        &mut scratch.db,
-        entry,
-        Some("<p>The article.</p>".to_owned()),
-        1_700_000_000,
-    )
-    .expect("could not store the article");
-
-    let stored = store::entry(&mut scratch.db, entry).expect("could not read the entry");
-
-    assert_eq!(stored.article.as_deref(), Some("<p>The article.</p>"));
-    assert_eq!(stored.article_at, Some(1_700_000_000));
-}
-
-#[test]
-fn a_page_with_nothing_in_it_is_still_recorded_as_read() {
-    let mut scratch = Scratch::new("empty");
-    let source = scratch.source();
-    let entry = scratch.entry(source);
-
-    store::set_article(&mut scratch.db, entry, None, 1_700_000_000)
-        .expect("could not record the attempt");
-
-    let stored = store::entry(&mut scratch.db, entry).expect("could not read the entry");
-
-    // Both halves matter. The timestamp is what stops the page being fetched
-    // again on every open, and the text has to be absent rather than a leftover
-    // from a previous attempt — which is only true if writing `None` reaches
-    // the column.
-    assert_eq!(stored.article, None);
-    assert_eq!(stored.article_at, Some(1_700_000_000));
-}
-
-#[test]
-fn a_refresh_does_not_take_the_article_with_it() {
-    let mut scratch = Scratch::new("refresh");
-    let source = scratch.source();
-    let entry = scratch.entry(source);
-
-    store::set_article(
-        &mut scratch.db,
-        entry,
-        Some("<p>The article.</p>".to_owned()),
-        1_700_000_000,
-    )
-    .expect("could not store the article");
-
-    // The same window the plugin returns on every refresh: a title and an
-    // address, and nothing behind either of them. This is what an aggregator
-    // always sends, and the reason the article is not stored in `content` —
-    // which this call rewrites.
-    store::ingest(
-        &mut scratch.db,
-        source,
-        &[NewEntry {
-            external_id: "hn:1".to_owned(),
-            title: "A story".to_owned(),
-            url: Some("https://example.com/a-story".to_owned()),
-            summary: Some("312 分 · 84 条评论".to_owned()),
-            ..NewEntry::default()
-        }],
-    )
-    .expect("could not ingest");
-
-    let stored = store::entry(&mut scratch.db, entry).expect("could not read the entry");
-
-    assert_eq!(stored.article.as_deref(), Some("<p>The article.</p>"));
-    assert_eq!(stored.article_at, Some(1_700_000_000));
-    assert_eq!(stored.content, None);
-}
-
-#[test]
 fn the_params_a_plugin_attached_are_kept_for_the_preview() {
     let mut scratch = Scratch::new("params");
     let source = scratch.source();
@@ -199,7 +120,7 @@ fn the_params_a_plugin_attached_are_kept_for_the_preview() {
 
 #[test]
 fn what_the_plugin_drew_is_stored_with_when_it_drew_it() {
-    let mut scratch = Scratch::new("preview-stores");
+    let mut scratch = Scratch::new("stores");
     let source = scratch.source();
     let entry = scratch.entry(source);
 
@@ -222,7 +143,7 @@ fn what_the_plugin_drew_is_stored_with_when_it_drew_it() {
 
 #[test]
 fn a_preview_hook_that_drew_nothing_is_still_recorded_as_asked() {
-    let mut scratch = Scratch::new("preview-empty");
+    let mut scratch = Scratch::new("empty");
     let source = scratch.source();
     let entry = scratch.entry(source);
 
@@ -239,7 +160,7 @@ fn a_preview_hook_that_drew_nothing_is_still_recorded_as_asked() {
 
 #[test]
 fn a_refresh_does_not_take_the_preview_with_it() {
-    let mut scratch = Scratch::new("preview-refresh");
+    let mut scratch = Scratch::new("refresh");
     let source = scratch.source();
     let entry = scratch.entry(source);
 

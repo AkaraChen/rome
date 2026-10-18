@@ -8,11 +8,16 @@
 // worth noting as a general point: the plugin runtime has `fetch` but no DOM
 // and no HTML parser. Scraping a page means bundling a parser (or writing
 // regexes) into the plugin file before shipping it.
+//
+// It also shows the other half of the contract: a listing knows a title and an
+// address, and `preview` is where the plugin opens the story — the item's own
+// text, or the article it links to, read through the host's extractor. The host
+// reads nothing on its own; every request here is this file's.
 
 export const meta = {
   id: 'rome.hacker-news',
   name: 'Hacker News',
-  version: '1.0.0',
+  version: '1.1.0',
   apiVersion: '1',
   view: 'articles',
   description: 'Hacker News 首页故事',
@@ -77,4 +82,37 @@ export async function fetch(ctx) {
   ctx.log.info(`hacker-news: ${entries.length} 条`)
 
   return { entries }
+}
+
+/// The story's own page: the text for an Ask/Show HN post, and the article it
+/// links to otherwise.
+///
+/// `ctx.article` is `ctx.fetch` with the reader's extractor on the end of it —
+/// the host fetches the address under this plugin's id and hands back the story
+/// with the page's furniture removed. What the plugin decides is which address,
+/// and whether there is one worth reading at all.
+export async function preview(ctx) {
+  const id = String(ctx.item?.id ?? '').replace(/^hn:/, '')
+
+  if (!id) return null
+
+  const response = await ctx.fetch(`${API}/item/${id}.json`)
+
+  if (response.ok) {
+    const story = await response.json()
+
+    // Ask HN and Show HN are written on the site itself; the item text is the
+    // story, and there is no second page to open.
+    if (story?.text) return { content: story.text }
+  }
+
+  const url = ctx.item?.url
+
+  // A discussion link has no article behind it. Saying so is an answer; the
+  // host keeps whatever the listing already had.
+  if (!url || url.startsWith('https://news.ycombinator.com/')) return null
+
+  const content = await ctx.article(url)
+
+  return content === null ? null : { content }
 }

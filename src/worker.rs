@@ -20,19 +20,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use flume::{Receiver, RecvTimeoutError, Sender};
-use serde_json::{Value, json};
+use serde_json::Value;
 use toasty::migration::MigrationSet;
 
 use crate::db::Database;
-use crate::http::{Http, HttpResponse, RequestInit, recent_domains};
+use crate::http::{Http, recent_domains};
 use crate::models::View;
 use crate::plugin::DialogRequest;
 use crate::plugin::session::{self, Dialogs, Manifest};
 use crate::snapshot::{
-    Article, EntryDetail, EntryRow, ListRow, PluginRow, Selection, Snapshot, SourceRow, Tab,
+    Body, EntryDetail, EntryRow, ListRow, PluginRow, Selection, Snapshot, SourceRow, Tab,
 };
 use crate::store::{self, NewPlugin, NewSource};
-use crate::ui::content;
 use crate::view_order;
 
 /// How many entries the middle column loads.
@@ -341,18 +340,17 @@ struct State {
 
 /// What still has to be fetched for an entry that was just opened.
 ///
-/// One decision per open, made when the entry is read out of the store, so the
-/// two ways of getting a body cannot both run: the plugin's page and the host's
-/// reading of the URL are alternatives, not a sequence.
+/// One decision per open, made when the entry is read out of the store. The
+/// host does not fetch anything on its own: if the entry's plugin exports a
+/// `preview` hook, the plugin is asked to draw the entry's page, and if it does
+/// not, the entry is what the listing made it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
-    /// Nothing: the entry brought its own body.
+    /// Nothing: the entry brought its own body, or there is nobody to ask.
     Nothing,
     /// The plugin's own page for the item. It exports a `preview` hook and has
     /// not been asked for this entry yet.
     Preview,
-    /// The page behind the entry's URL, for the host to read and strip.
-    Article,
 }
 
 impl State {
@@ -393,24 +391,17 @@ impl State {
 
                 self.open = opened.map(|(entry, _)| entry);
 
-                if let Page::Preview | Page::Article = page {
+                if let Page::Preview = page {
                     // The entry goes on screen before its page is fetched, so a
-                    // site that takes ten seconds to answer shows as a line
-                    // saying the page is being read rather than as the entry
+                    // plugin that takes ten seconds to answer shows as a line
+                    // saying the page is being drawn rather than as the entry
                     // that was open a moment ago.
                     if let Some(open) = &mut self.open {
-                        match page {
-                            Page::Preview => open.preview = Article::Reading,
-                            _ => open.article = Article::Reading,
-                        }
+                        open.preview = Body::Reading;
                     }
 
                     self.publish(events);
-
-                    match page {
-                        Page::Preview => self.read_open_preview(),
-                        _ => self.read_open_article(),
-                    }
+                    self.read_open_preview();
                 }
             }
 
@@ -465,6 +456,11 @@ impl State {
                         // way, and the only thing it could still be doing is
                         // tidying up.
                         let _ = session::deactivate_plugin(&mut self.db, &mut self.http, plugin_id);
+
+                        // The plugin may have been idle rather than in a
+                        // call, in which case deactivating started nothing and
+                        // the warm runtime is still there.
+                        session::forget_plugin(plugin_id);
                     }
                     Ok(()) => {}
                     Err(error) => self.error = Some(error.to_string()),
@@ -688,10 +684,10 @@ impl State {
     /// because there should not need to be: a reader that made you click twice
     /// to acknowledge an item you had just read would be a worse reader.
     ///
-    /// The bool is whether the entry's own page still has to be read, which is
-    /// [`State::read_open_article`]'s question. It is answered here because
-    /// this is where the row is in hand; the answer is not part of the entry
-    /// the pane draws.
+    /// The page is whether the plugin still has to draw the entry's body,
+    /// which is [`State::read_open_preview`]'s question. It is answered here
+    /// because this is where the row is in hand; the answer is not part of the
+    /// entry the pane draws.
     fn open_entry(&mut self, entry_id: u64) -> Option<(EntryDetail, Page)> {
         if let Err(error) = store::set_read(&mut self.db, entry_id, true) {
             self.error = Some(error.to_string());
@@ -705,28 +701,12 @@ impl State {
             .map(|plugin| plugin.has_preview)
             .unwrap_or(false);
 
-        // A plugin that returned a body has already said what the entry is,
-        // and the host has no business fetching a page to replace it with.
-        // What is left is the aggregators: an address, a title, and nothing
-        // behind either of them.
-        let plugin_body = entry
-            .content
-            .as_deref()
-            .is_some_and(|content| !content.trim().is_empty());
-
-        // The plugin's own page first, because it knows what the item is. The
-        // host only knows where it lives, and reads whatever HTML is served at
-        // that address — which for a video, a login wall or a JavaScript shell
-        // is nothing at all. Falling back to the address is what happens when
-        // the plugin has no preview hook, not when it has one that failed.
+        // The plugin's own page, if it said it can draw one and has not been
+        // asked for this entry yet. Nothing else is fetched: the host is not a
+        // scraper, and an entry whose plugin has no preview is what the listing
+        // made it.
         let page = if plugin_preview && entry.preview.is_none() && entry.preview_at.is_none() {
             Page::Preview
-        } else if !plugin_body
-            && entry.article.is_none()
-            && entry.article_at.is_none()
-            && entry.url.is_some()
-        {
-            Page::Article
         } else {
             Page::Nothing
         };
@@ -739,8 +719,7 @@ impl State {
             published_at: entry.published_at,
             content: entry.content,
             summary: entry.summary,
-            article: entry.article.map_or(Article::Idle, Article::Read),
-            preview: entry.preview.map_or(Article::Idle, Article::Read),
+            preview: entry.preview.map_or(Body::Idle, Body::Read),
             image: entry.image,
             source_title,
             read: true,
@@ -770,101 +749,21 @@ impl State {
         let entry_id = open.id;
 
         let preview = match session::preview_entry(&mut self.db, &mut self.http, None, entry_id) {
-            Ok(preview) => preview.map_or(Article::Idle, Article::Read),
-            // As with the host's own read, the reason is not shown: the pane's
-            // line says the page could not be read and that opening the entry
-            // again will try, which is everything the reader can act on.
-            Err(_) => Article::Failed,
+            Ok(preview) => preview.map_or(Body::Idle, Body::Read),
+            // The reason is not shown: the pane's line says the detail could
+            // not be read and that opening the entry again will try, which is
+            // everything the reader can act on.
+            Err(_) => Body::Failed,
         };
 
-        // Only if the reader has not moved on, for the same reason as
-        // `read_open_article`.
+        // Only if the reader has not moved on. The call blocks the worker, so
+        // nothing else could have changed `open`; saying so here keeps that
+        // true if it ever stops being so.
         if let Some(open) = &mut self.open
             && open.id == entry_id
         {
             open.preview = preview;
         }
-    }
-
-    /// Read the open entry's own page and put what it finds in the pane.
-    ///
-    /// Blocks the worker for as long as the request takes, the same way a
-    /// refresh does. The window stays live — it draws the snapshot published
-    /// before this was called — and nothing the user asks for while it runs is
-    /// lost, only queued behind it.
-    ///
-    /// A page that could not be fetched leaves `article_at` unset, so opening
-    /// the entry again tries again. A page that *was* fetched records the
-    /// attempt whether or not it had an article in it, so a video or a login
-    /// wall is read once and never fetched again.
-    fn read_open_article(&mut self) {
-        let Some(open) = &self.open else {
-            return;
-        };
-
-        let entry_id = open.id;
-        let Some(url) = open.url.clone() else {
-            return;
-        };
-
-        let article = match self.fetch_article(&url) {
-            Ok(article) => {
-                if let Err(error) =
-                    store::set_article(&mut self.db, entry_id, article.clone(), store::now())
-                {
-                    self.error = Some(error.to_string());
-                }
-
-                article.map_or(Article::Idle, Article::Read)
-            }
-            // The reason is not shown: a reader who opened a link wants the
-            // words, and "connection reset by peer" is not one of them. The
-            // line the pane draws says the page could not be read and that
-            // opening it again will try, which is the whole of what the reader
-            // can act on.
-            Err(_) => Article::Failed,
-        };
-
-        // Only if the reader has not moved on: this runs on the worker thread
-        // with everything else, so nothing else could have changed `open`, but
-        // saying so here is what keeps that true if it ever stops being so.
-        if let Some(open) = &mut self.open
-            && open.id == entry_id
-        {
-            open.article = article;
-        }
-    }
-
-    /// Fetch one page and take the article out of it.
-    ///
-    /// `Ok(None)` is a page that was read and had no article in it — a video, a
-    /// login wall, a PDF. `Err` is a page that was not read at all.
-    fn fetch_article(&mut self, url: &str) -> Result<Option<String>, String> {
-        let init = RequestInit::from_json(&json!({
-            "headers": {
-                // The conventional browser set. A site that negotiates on this
-                // header should hand a reader the page rather than the feed.
-                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-        }));
-
-        // `None` for the plugin: this is a request the host made for itself,
-        // and the log's per-plugin domain list is a plugin's trust story rather
-        // than a record of what the app did on its own.
-        let response = self
-            .http
-            .request(&mut self.db, None, url, init)
-            .map_err(|error| error.to_string())?;
-
-        if !(200..300).contains(&response.status) {
-            return Err(format!("the page answered {}", response.status));
-        }
-
-        if !is_html(&response) {
-            return Ok(None);
-        }
-
-        Ok(content::article(&response.body))
     }
 
     /// Install a plugin and subscribe to it, in one step.
@@ -1156,30 +1055,6 @@ impl State {
 
         Ok(())
     }
-}
-
-/// Whether a response is markup rather than something with no prose in it.
-///
-/// A link in a feed is as likely to be a PDF, a video or an image as it is to
-/// be an article, and none of those has a body to read. A response that names
-/// no type at all is given the benefit of the doubt: plenty of servers omit the
-/// header, and refusing those would give up on pages that are perfectly
-/// readable.
-fn is_html(response: &HttpResponse) -> bool {
-    let Some(kind) = response
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-        .map(|(_, value)| value)
-    else {
-        return true;
-    };
-
-    // The header carries its charset after a semicolon often enough that
-    // comparing the whole value would reject most of the web.
-    let kind = kind.split(';').next().unwrap_or_default().trim();
-
-    kind.eq_ignore_ascii_case("text/html") || kind.eq_ignore_ascii_case("application/xhtml+xml")
 }
 
 /// Read a plugin file and ask it what it is.

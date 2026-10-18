@@ -142,6 +142,17 @@ they disable it. Both may be async, and both may be omitted. They return nothing
 They are for setup that is not fetching: warming a cache, writing a first-run key to storage,
 clearing timers. Do not fetch entries here — that is `fetch`'s job, and Rome decides when.
 
+### One process, many calls
+
+The runtime stays alive between calls. `activate` loads your module once, and later `fetch`
+and `preview` calls land in the same process, so module-level state — a token you refreshed,
+a warm cache, a counter — is still there. That is what makes an auth-refresh loop worth
+writing at all.
+
+Installing a new version starts a new process, so nothing survives an upgrade. The app may
+also reclaim an idle runtime after a while, so anything that has to survive a restart belongs
+in `ctx.storage`, not in a top-level `let`.
+
 ---
 
 ## The entry object
@@ -205,6 +216,7 @@ Every call gets a fresh `ctx`.
 | `ctx.cursor` | the cursor from the previous `fetch`, or `null` on the first call |
 | `ctx.item` | inside `preview`, the entry being opened — `{ id, title, url, params }`; `null` everywhere else |
 | `ctx.fetch` | `fetch`, but through the host |
+| `ctx.article` | one page fetched by the host and stripped to the article — see below |
 | `ctx.storage` | your plugin's key/value store |
 | `ctx.ui` | dialogs, progress, opening a browser and the login window, plus `alert`/`confirm`/`prompt` as globals |
 | `ctx.log` | `debug` / `info` / `warn` / `error`, and callable on its own |
@@ -252,6 +264,26 @@ await response.clone()
 
 The global `fetch` is the same function, so `fetch(...)` and `ctx.fetch(...)` are
 interchangeable.
+
+### `ctx.article(url)`
+
+`ctx.fetch`, with the reader's extractor on the end: the host fetches the page under your
+plugin's id and hands back the story with the page's furniture removed — the `<article>` or
+`<main>` region, scripts and styles gone. `null` means the page was read and had no story in
+it (a video, a login wall, a PDF), which is a normal answer rather than an error.
+
+This is the intended way to fill a `preview`: the listing knows a title and an address, and
+this turns the address into something worth reading.
+
+```js
+export async function preview(ctx) {
+    const content = await ctx.article(ctx.item.url);
+    return content === null ? null : { content };
+}
+```
+
+The request is still yours. It appears in the plugin's domain log, picks up its cookies, and
+happens only when you call it — the host never opens an entry's page on its own.
 
 **Where this differs from the browser.** The host carries the body as a UTF-8 string, so:
 

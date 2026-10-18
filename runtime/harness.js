@@ -16,7 +16,7 @@
  *               {"id": <u64>, "error": {"message": "<string>"}}
  *
  * Host -> plugin:  describe / fetch / preview / activate / deactivate
- * Plugin -> host:  http / ui / storage.get / storage.set / log
+ * Plugin -> host:  http / article / ui / storage.get / storage.set / log
  *
  * The crux is that plugin -> host requests arrive *while* the host is waiting
  * for a plugin response. The read loop below therefore never blocks on a
@@ -567,6 +567,28 @@ async function hostFetch(input, init) {
     return HostResponse.fromHostReply(reply, url);
 }
 
+/**
+ * `ctx.article(url)`: one page, read the way the reading pane reads it.
+ *
+ * The host fetches it under this plugin's id — the same cookie jar, user agent
+ * and domain log as `ctx.fetch` — and runs the reader's extractor over the
+ * result. What comes back is the story with the page's furniture removed,
+ * exactly the shape `preview` is meant to return, or `null` when the page was
+ * read and had no story in it.
+ *
+ * A plugin still decides what to fetch and when. This only saves every plugin
+ * that reads a page from reimplementing the same stripping in JavaScript.
+ */
+async function hostArticle(input) {
+    const url = input instanceof URL ? input.href : String(input ?? "");
+
+    if (url === "") {
+        throw new TypeError("article: missing URL");
+    }
+
+    return await hostCall("article", { url });
+}
+
 // ---------------------------------------------------------------------------
 // log
 // ---------------------------------------------------------------------------
@@ -865,6 +887,7 @@ function makeCtx(params) {
         cursor: (params.cursor === undefined || params.cursor === null) ? null : String(params.cursor),
         item: (params.item !== null && typeof params.item === "object") ? params.item : null,
         fetch: hostFetch,
+        article: hostArticle,
         storage,
         ui,
         log

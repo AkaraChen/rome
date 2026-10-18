@@ -21,6 +21,7 @@ use crate::paths;
 use crate::plugin::sidecar::{self, Sidecar};
 use crate::plugin::{DialogRequest, HostRequest, method};
 use crate::store::{self, IngestReport, NewEntry};
+use crate::ui::content;
 use crate::worker::Event;
 
 /// Why a plugin run failed.
@@ -268,18 +269,50 @@ fn describe_staged(path: &Path) -> Result<Manifest, PluginError> {
 /// `Send`: the child, its pipes and the database handle all belong to the
 /// thread that made them, and [`Session::fetch`] blocks that thread for as long
 /// as the plugin takes.
+///
+/// The child outlives the session. Starting a runtime, loading a module and
+/// building whatever it sets up at the top of the file costs more than most
+/// calls spend on the network, and a plugin's own state — a token it refreshed,
+/// a page it already asked for — only means anything if the next call lands in
+/// the same process. So [`Session::drop`] hands the sidecar back to [`pool`],
+/// and [`Session::start`] takes it out again for the next call.
 struct Session<'a> {
-    sidecar: Sidecar,
+    sidecar: Option<Sidecar>,
     services: Services<'a>,
+    /// Which plugin the runtime belongs to, and which code it is running.
+    ///
+    /// Both are what the pool keys on: an upgrade changes the code, and a
+    /// runtime still running the old code must not answer for the new one.
+    plugin_id: u64,
+    source: u64,
+    /// Set when the process must not be handed back: activation failed, or
+    /// `deactivate` has run and the plugin is on its way out.
+    retire: bool,
+}
+
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        let Some(sidecar) = self.sidecar.take() else {
+            return;
+        };
+
+        if self.retire {
+            // Dropped here rather than returned, which kills the child.
+            return;
+        }
+
+        pool::put(self.plugin_id, self.source, sidecar);
+    }
 }
 
 impl<'a> Session<'a> {
     /// Start `plugin`, with `db` and `http` answering the requests it makes.
     ///
-    /// The code is written to disk first. The database is the source of truth
-    /// for it, but `tjs` loads a plugin from a path, and materialising it means
-    /// the exact code that ran is still there to read afterwards — which is the
-    /// first thing anyone looks at when a plugin misbehaves.
+    /// A runtime from the pool is preferred when it is already running the
+    /// same code; otherwise the code is written to disk first, because `tjs`
+    /// loads a plugin from a path. Materialising it means the exact code that
+    /// ran is still there to read afterwards — which is the first thing anyone
+    /// looks at when a plugin misbehaves.
     fn start(
         plugin: &Plugin,
         db: &'a mut Database,
@@ -287,15 +320,22 @@ impl<'a> Session<'a> {
         dialogs: Option<&'a mut dyn Dialogs>,
         events: Option<&'a flume::Sender<Event>>,
     ) -> Result<Self, PluginError> {
-        let path = paths::plugin_code_path(db.path(), plugin.id).map_err(environment)?;
-        std::fs::write(&path, &plugin.source_code).map_err(environment)?;
+        let source = fingerprint(&plugin.source_code);
 
-        let harness = sidecar::harness_path().map_err(environment)?;
-        let sidecar = Sidecar::spawn_with_args(&harness, [&path])
-            .map_err(|error| PluginError::Environment(error.to_string()))?;
+        let sidecar = match pool::take(plugin.id, source) {
+            Some(sidecar) => sidecar,
+            None => {
+                let path = paths::plugin_code_path(db.path(), plugin.id).map_err(environment)?;
+                std::fs::write(&path, &plugin.source_code).map_err(environment)?;
+
+                let harness = sidecar::harness_path().map_err(environment)?;
+                Sidecar::spawn_with_args(&harness, [&path])
+                    .map_err(|error| PluginError::Environment(error.to_string()))?
+            }
+        };
 
         Ok(Self {
-            sidecar,
+            sidecar: Some(sidecar),
             services: Services {
                 plugin_id: plugin.id,
                 db,
@@ -304,7 +344,15 @@ impl<'a> Session<'a> {
                 events,
                 log: Vec::new(),
             },
+            plugin_id: plugin.id,
+            source,
+            retire: false,
         })
+    }
+
+    /// Make sure this runtime is killed when the session ends.
+    fn retire(&mut self) {
+        self.retire = true;
     }
 
     /// Run the plugin's `activate`, which is where it sets itself up.
@@ -318,9 +366,13 @@ impl<'a> Session<'a> {
         // parameters and no way to choose between them here.
         let params = json!({ "settings": plugin.settings, "params": {} });
 
-        let Self { sidecar, services } = self;
+        let Self {
+            sidecar, services, ..
+        } = self;
 
         sidecar
+            .as_mut()
+            .expect("a session always holds its runtime")
             .call(method::ACTIVATE, params, |request| {
                 services.dispatch(request)
             })
@@ -334,9 +386,13 @@ impl<'a> Session<'a> {
     /// A plugin with nothing to shut down simply does not define the hook, so
     /// this succeeds silently in the common case.
     fn deactivate(&mut self) -> Result<(), PluginError> {
-        let Self { sidecar, services } = self;
+        let Self {
+            sidecar, services, ..
+        } = self;
 
         sidecar
+            .as_mut()
+            .expect("a session always holds its runtime")
             .call(method::DEACTIVATE, json!({}), |request| {
                 services.dispatch(request)
             })
@@ -366,9 +422,13 @@ impl<'a> Session<'a> {
         // Destructured so the sidecar and the services are borrowed as separate
         // fields: the handler runs *inside* the call, and needs the services
         // while the call still holds the sidecar.
-        let Self { sidecar, services } = self;
+        let Self {
+            sidecar, services, ..
+        } = self;
 
         let result = sidecar
+            .as_mut()
+            .expect("a session always holds its runtime")
             .call(method::FETCH, params, |request| services.dispatch(request))
             .map_err(|error| PluginError::Run(error.to_string()))?;
 
@@ -403,9 +463,13 @@ impl<'a> Session<'a> {
             },
         });
 
-        let Self { sidecar, services } = self;
+        let Self {
+            sidecar, services, ..
+        } = self;
 
         let result = sidecar
+            .as_mut()
+            .expect("a session always holds its runtime")
             .call(method::PREVIEW, params, |request| {
                 services.dispatch(request)
             })
@@ -416,6 +480,123 @@ impl<'a> Session<'a> {
             .and_then(Value::as_str)
             .filter(|content| !content.trim().is_empty())
             .map(str::to_owned))
+    }
+}
+
+/// A stable-enough identity for one version of a plugin's code.
+///
+/// The point is not cryptography. It is to notice that the row's `source_code`
+/// is no longer the text the running runtime loaded, so an upgrade starts a new
+/// process instead of being answered by the old one.
+fn fingerprint(source: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The runtimes that are still alive between calls.
+///
+/// Starting `tjs` costs far more than handing it another line, and a plugin is
+/// usually called several times in a row — open, preview, refresh — so the
+/// session that finishes a call leaves its child here rather than killing it.
+/// The next call for the same plugin takes it back out.
+///
+/// The pool is per thread because the caller is: the worker owns every plugin
+/// run in the application, and a `tjs` child is not something to move between
+/// threads behind the protocol's back. Tests get one each for the same reason.
+mod pool {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    use super::Sidecar;
+
+    /// How long an unused runtime is kept before it is killed.
+    ///
+    /// Long enough to cover a reader moving between entries, short enough that
+    /// leaving the application open overnight does not leave a process per
+    /// plugin running until morning.
+    const IDLE: Duration = Duration::from_secs(10 * 60);
+
+    /// How many runtimes may wait at once.
+    ///
+    /// Bounds the process count for a reader with many plugins. The longest
+    /// idle one goes first; the ones being used keep their place.
+    const MAX: usize = 8;
+
+    struct Warm {
+        sidecar: Sidecar,
+        source: u64,
+        used: Instant,
+    }
+
+    thread_local! {
+        static WARM: RefCell<HashMap<u64, Warm>> = RefCell::new(HashMap::new());
+    }
+
+    /// Take the runtime for `plugin_id` back, if it is alive and running
+    /// `source`.
+    ///
+    /// A runtime that died, that has gone too long without a call, or that is
+    /// running other code is dropped — which kills it — and `None` says to
+    /// start a new one.
+    pub fn take(plugin_id: u64, source: u64) -> Option<Sidecar> {
+        WARM.with(|warm| {
+            let mut warm = warm.borrow_mut();
+            let now = Instant::now();
+
+            warm.retain(|_, idle| now.duration_since(idle.used) < IDLE && idle.sidecar.alive());
+
+            match warm.remove(&plugin_id) {
+                Some(idle) if idle.source == source => Some(idle.sidecar),
+                _ => None,
+            }
+        })
+    }
+
+    /// Keep `sidecar` for the next call, unless it is already gone.
+    pub fn put(plugin_id: u64, source: u64, mut sidecar: Sidecar) {
+        if !sidecar.alive() {
+            return;
+        }
+
+        WARM.with(|warm| {
+            let mut warm = warm.borrow_mut();
+
+            while warm.len() >= MAX {
+                let oldest = warm
+                    .iter()
+                    .min_by_key(|(_, idle)| idle.used)
+                    .map(|(id, _)| *id);
+
+                let Some(oldest) = oldest else {
+                    break;
+                };
+
+                warm.remove(&oldest);
+            }
+
+            warm.insert(
+                plugin_id,
+                Warm {
+                    sidecar,
+                    source,
+                    used: Instant::now(),
+                },
+            );
+        });
+    }
+
+    /// Kill whatever is waiting for `plugin_id`.
+    ///
+    /// Called when the plugin is switched off: a runtime that was not asked to
+    /// deactivate still has no business outliving the switch.
+    pub fn forget(plugin_id: u64) {
+        WARM.with(|warm| {
+            warm.borrow_mut().remove(&plugin_id);
+        });
     }
 }
 
@@ -548,7 +729,7 @@ pub fn refresh_source(
 /// `Ok(None)` is a normal answer: the hook can decide, per item, that it has
 /// nothing to add. Whether the run succeeded is recorded here rather than left
 /// to the caller, because an entry marked as previewed with no preview in it
-/// would never be asked again — the same rule as the host's own article.
+/// would never be asked again, and "nothing to show" is still an answer.
 pub fn preview_entry(
     db: &mut Database,
     http: &mut Http,
@@ -571,6 +752,11 @@ pub fn preview_entry(
         Ok(drawn) => drawn,
         Err(error) => return Err(error.with_log(session.log())),
     };
+
+    // The session holds the database mutably for as long as it lives, and now
+    // that dropping it hands the runtime back to the pool, the borrow ends
+    // here rather than at the end of the function.
+    drop(session);
 
     store::set_preview(db, entry_id, drawn.clone(), store::now()).map_err(environment)?;
 
@@ -596,7 +782,17 @@ pub fn activate_plugin(
 
     match session.activate(&plugin) {
         Ok(()) => Ok(()),
-        Err(error) => Err(error.with_log(session.log())),
+        Err(error) => {
+            let error = error.with_log(session.log());
+
+            // Activation is where a plugin sets up the state everything after
+            // it assumes. One that failed halfway must not be handed to the
+            // next call: a fresh process and a clean attempt is the only way to
+            // tell "it is broken" from "it was broken for a moment".
+            session.retire();
+
+            Err(error)
+        }
     }
 }
 
@@ -617,7 +813,22 @@ pub fn deactivate_plugin(
     // message about a thing that is already gone.
     let mut session = Session::start(&plugin, db, http, None, None)?;
 
-    session.deactivate()
+    let result = session.deactivate();
+
+    // Whatever it said on the way out, this process has no next call. Dropping
+    // the session kills it rather than leaving it in the pool.
+    session.retire();
+
+    result
+}
+
+/// Kill any runtime still waiting for `plugin_id`.
+///
+/// Switching a plugin off is the one moment the pool has to be told directly:
+/// the plugin may be idle rather than in a call, so there is no session to
+/// retire.
+pub fn forget_plugin(plugin_id: u64) {
+    pool::forget(plugin_id);
 }
 
 /// One run, from the plugin process to rows in the database.
@@ -637,6 +848,11 @@ fn run(
         Ok(fetched) => fetched,
         Err(error) => return Err(error.with_log(session.log())),
     };
+
+    // The runtime goes back to the pool before the database is touched again;
+    // the session's borrow of it would otherwise last to the end of the
+    // function, because a type with a `Drop` is dropped after its scope.
+    drop(session);
 
     let report = store::ingest(db, source.id, &fetched.entries).map_err(environment)?;
 
@@ -677,6 +893,7 @@ impl Services<'_> {
     fn dispatch(&mut self, request: HostRequest) -> Result<Value, String> {
         match request.method.as_str() {
             method::HTTP => self.http(request.params),
+            method::ARTICLE => self.article(request.params),
             method::STORAGE_GET => self.storage_get(request.params),
             method::STORAGE_SET => self.storage_set(request.params),
             method::LOG => self.record_log(request.params),
@@ -701,7 +918,7 @@ impl Services<'_> {
 
         let response = self
             .http
-            .request(self.db, Some(self.plugin_id), url, init)
+            .request(self.db, self.plugin_id, url, init)
             .map_err(|error| error.to_string())?;
 
         // Headers as pairs: the harness accepts either shape, and a list is the
@@ -711,6 +928,46 @@ impl Services<'_> {
             "headers": response.headers,
             "body": response.body,
         }))
+    }
+
+    /// Read one page as an article, on the plugin's request.
+    ///
+    /// This is [`Services::http`] with the reader's extractor on the end of it,
+    /// for the plugins that know a page is a story rather than a feed. The
+    /// request is still the plugin's — its id, its cookie jar, its domain log —
+    /// and the plugin still chooses the address and the moment. What it does
+    /// not have to reimplement is stripping a page down to what a reader wants.
+    ///
+    /// `null` is a page that was read and had no article in it: a video, a
+    /// login wall, a PDF. An `Err` is a page that was not read at all.
+    fn article(&mut self, params: Value) -> Result<Value, String> {
+        let url = params
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or("`article` needs a `url`")?;
+
+        let init = RequestInit::from_json(&json!({
+            "headers": {
+                // The conventional browser set. A site that negotiates on this
+                // header should hand a reader the page rather than the feed.
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        }));
+
+        let response = self
+            .http
+            .request(self.db, self.plugin_id, url, init)
+            .map_err(|error| error.to_string())?;
+
+        if !(200..300).contains(&response.status) {
+            return Err(format!("the page answered {}", response.status));
+        }
+
+        if !is_html(&response.headers) {
+            return Ok(Value::Null);
+        }
+
+        Ok(content::article(&response.body).map_or(Value::Null, Value::String))
     }
 
     /// Read a value the plugin stored for itself.
@@ -866,6 +1123,26 @@ impl Services<'_> {
 }
 
 /// A storage or database failure, as a message the user can be shown.
+/// Whether a response is a page the article extractor can read.
+///
+/// A missing `content-type` is treated as HTML: plenty of pages omit it, and
+/// the extractor itself answers `None` for a body it finds no article in.
+fn is_html(headers: &[(String, String)]) -> bool {
+    let Some(kind) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value)
+    else {
+        return true;
+    };
+
+    // The header carries its charset after a semicolon often enough that
+    // comparing the whole value would reject most of the web.
+    let kind = kind.split(';').next().unwrap_or_default().trim();
+
+    kind.eq_ignore_ascii_case("text/html") || kind.eq_ignore_ascii_case("application/xhtml+xml")
+}
+
 fn environment(error: impl std::fmt::Display) -> PluginError {
     PluginError::Environment(error.to_string())
 }
@@ -965,14 +1242,15 @@ mod tests {
         sidecar::runtime_path().is_ok() && sidecar::harness_path().is_ok()
     }
 
-    /// Install `source_code` as a plugin and create one source for it.
+    /// Install `source_code`, upgrading the row of a plugin already installed
+    /// under the same id.
     ///
     /// Described first, the way the application does it, so a plugin's declared
     /// hooks land on the row exactly as they would for a real install.
-    fn install(db: &mut Database, source_code: &str) -> u64 {
+    fn install_plugin(db: &mut Database, source_code: &str) -> Plugin {
         let manifest = describe(source_code).expect("the plugin should describe");
 
-        let plugin = store::install_plugin(
+        store::install_plugin(
             db,
             NewPlugin {
                 plugin_id: manifest.plugin_id.clone(),
@@ -989,7 +1267,12 @@ mod tests {
                 has_preview: manifest.preview,
             },
         )
-        .expect("the plugin should install");
+        .expect("the plugin should install")
+    }
+
+    /// Install `source_code` as a plugin and create one source for it.
+    fn install(db: &mut Database, source_code: &str) -> u64 {
+        let plugin = install_plugin(db, source_code);
 
         store::create_source(
             db,
@@ -1304,6 +1587,97 @@ export async function fetch(ctx) {
         assert_eq!(stored.preview_at, None);
     }
 
+    /// A plugin is a process, not a call. The runtime that answered one fetch
+    /// answers the next, so whatever it set up at the top of the file — a
+    /// token, a cache, a counter — is still there.
+    ///
+    /// The counter is the evidence. A fresh process would start it at one
+    /// again, and the second run would dedupe away as a repeat of the first.
+    #[test]
+    fn the_runtime_survives_between_calls() {
+        require_runtime!();
+
+        let mut scratch = Scratch::new();
+        let source_id = install(
+            &mut scratch.db,
+            r#"
+export const meta = { id: 'test.counting', name: 'Counting', version: '1.0.0', apiVersion: '1' }
+
+let runs = 0
+
+export async function fetch(ctx) {
+  runs += 1
+  return { entries: [{ id: `run:${runs}`, title: `第 ${runs} 次` }] }
+}
+"#,
+        );
+
+        let mut http = Http::new();
+        refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the first refresh");
+        refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the second refresh");
+
+        let mut ids: Vec<String> = store::timeline(&mut scratch.db, None, 10)
+            .expect("a timeline")
+            .into_iter()
+            .map(|entry| entry.external_id)
+            .collect();
+        ids.sort();
+
+        assert_eq!(
+            ids,
+            ["run:1", "run:2"],
+            "the second call started a new runtime instead of reusing the warm one"
+        );
+    }
+
+    /// An upgrade is new code, so the next call may not be answered by the
+    /// process that loaded the old text. The id changes only if the new module
+    /// ran, which makes it the whole of the evidence.
+    #[test]
+    fn an_upgrade_starts_a_new_runtime() {
+        require_runtime!();
+
+        let mut scratch = Scratch::new();
+        let source_id = install(
+            &mut scratch.db,
+            r#"
+export const meta = { id: 'test.upgrade', name: 'Upgrade', version: '1.0.0', apiVersion: '1' }
+
+export async function fetch(ctx) {
+  return { entries: [{ id: 'old:1', title: '旧版' }] }
+}
+"#,
+        );
+
+        let mut http = Http::new();
+        refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the first refresh");
+
+        // Same plugin id, new code: exactly what installing a newer file does.
+        install_plugin(
+            &mut scratch.db,
+            r#"
+export const meta = { id: 'test.upgrade', name: 'Upgrade', version: '2.0.0', apiVersion: '1' }
+
+export async function fetch(ctx) {
+  return { entries: [{ id: 'new:1', title: '新版' }] }
+}
+"#,
+        );
+
+        refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the second refresh");
+
+        let ids: Vec<String> = store::timeline(&mut scratch.db, None, 10)
+            .expect("a timeline")
+            .into_iter()
+            .map(|entry| entry.external_id)
+            .collect();
+
+        assert!(
+            ids.contains(&"new:1".to_owned()),
+            "the upgraded code did not run; the old runtime answered: {ids:?}"
+        );
+    }
+
     /// A second run over the same items writes nothing: `id` is the whole of
     /// the deduplication key, and a feed that re-inserted itself every refresh
     /// would grow without bound while looking like it worked.
@@ -1458,6 +1832,115 @@ export async function fetch(ctx) {{
                 .iter()
                 .any(|request| request.url.ends_with("/hello") && request.status == Some(200)),
             "the request is in the host's log"
+        );
+
+        let _ = server.join();
+    }
+
+    /// `ctx.article` is a request the plugin makes, answered by the host
+    /// fetching the page under the plugin's id and stripping it to the story.
+    ///
+    /// The navigation and the footer are the evidence that the extractor ran;
+    /// the log entry is the evidence that the request is the plugin's, not one
+    /// the host decided to make.
+    #[test]
+    fn a_plugin_can_ask_for_an_article() {
+        require_runtime!();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("could not bind");
+        let port = listener
+            .local_addr()
+            .expect("the listener has an address")
+            .port();
+        listener
+            .set_nonblocking(true)
+            .expect("the listener can be non-blocking");
+
+        let page = format!(
+            "<html><body><nav>menu</nav><article><h1>Story</h1><p>{}</p></article>\
+             <footer>the footer</footer></body></html>",
+            "The story keeps going. ".repeat(20)
+        );
+
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buffer = [0u8; 2048];
+                        let _ = std::io::Read::read(&mut stream, &mut buffer);
+
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                            page.len()
+                        );
+
+                        let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() > deadline {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+
+        let mut scratch = Scratch::new();
+        let source_id = install(
+            &mut scratch.db,
+            &format!(
+                r#"
+export const meta = {{ id: 'test.plugin', name: 'Test', version: '1.0.0', apiVersion: '1' }}
+
+export async function fetch(ctx) {{
+  return {{ entries: [{{ id: 'one', title: 'A story', url: 'http://127.0.0.1:{port}/story' }}] }}
+}}
+
+export async function preview(ctx) {{
+  const content = await ctx.article(ctx.item.url)
+  return content === null ? null : {{ content }}
+}}
+"#
+            ),
+        );
+
+        let mut http = Http::new();
+        refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the refresh");
+
+        let entry = store::timeline(&mut scratch.db, None, 10)
+            .expect("a timeline")
+            .into_iter()
+            .next()
+            .expect("one entry");
+
+        let drawn = preview_entry(&mut scratch.db, &mut http, None, entry.id)
+            .expect("the preview")
+            .expect("the page should have a story in it");
+
+        assert!(drawn.contains("Story"), "the story text is missing");
+        assert!(
+            drawn.contains("The story keeps going."),
+            "the article paragraph is missing"
+        );
+        assert!(!drawn.contains("menu"), "the navigation was kept");
+        assert!(!drawn.contains("footer"), "the footer was kept");
+
+        let plugin_id = store::source(&mut scratch.db, source_id)
+            .expect("the source")
+            .plugin_id;
+
+        assert!(
+            http.request_log()
+                .iter()
+                .any(|request| request.url.ends_with("/story")
+                    && request.status == Some(200)
+                    && request.plugin == plugin_id),
+            "the article request is not in the log as the plugin's"
         );
 
         let _ = server.join();
