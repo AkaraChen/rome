@@ -966,6 +966,10 @@ async function runFetch(params) {
     result.entries.forEach(validateEntry);
 
     return {
+        // The source's icon. `null` — not an absent key — is what the host
+        // reads as "this run said nothing", so the field is normalised here
+        // rather than left to whether the plugin happened to set it.
+        icon: (result.icon === undefined || result.icon === null) ? null : String(result.icon),
         entries: result.entries,
         cursor: (result.cursor === undefined || result.cursor === null) ? null : String(result.cursor)
     };

@@ -164,14 +164,7 @@ fn a_reordered_sidebar_is_still_reordered_after_a_restart() {
     assert_eq!(view_order::resolve(stored.as_ref()), after);
     assert_eq!(
         after.iter().map(|view| view.name()).collect::<Vec<_>>(),
-        [
-            "articles",
-            "pictures",
-            "social",
-            "videos",
-            "audios",
-            "notifications"
-        ]
+        ["articles", "pictures", "social", "videos", "audios"]
     );
 }
 

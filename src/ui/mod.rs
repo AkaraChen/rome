@@ -24,6 +24,7 @@ pub mod app;
 pub mod content;
 pub mod dialog;
 pub mod entry_list;
+pub mod feed;
 pub mod form;
 pub mod lists;
 pub mod picture;
@@ -31,6 +32,7 @@ pub mod plugins;
 pub mod reading_pane;
 pub mod search;
 pub mod sidebar;
+pub mod wizard;
 
 /// Something the user did, in the one vocabulary the UI speaks.
 ///
@@ -43,9 +45,30 @@ pub mod sidebar;
 pub enum Action {
     /// Ask the worker to do something.
     Worker(Command),
-    /// Open the plugin picker, which starts in the UI because the worker has
-    /// nothing to do until there is a file to point at.
-    AddSource,
+    /// Open the add-source page on its installed-plugins tab.
+    ///
+    /// This is what 「添加信息源」 in the sidebar means: add a subscription to a
+    /// plugin that is already here. Installing a plugin is the page's other
+    /// tab, not the thing this button asks for.
+    OpenAddSource,
+    /// Open the add-source page on its market tab.
+    ///
+    /// The plugin manager's way to get more plugins. It is the same page
+    /// because it is the same journey — install, then subscribe — but a
+    /// different tab, because the two are different jobs.
+    OpenPluginMarket,
+    /// Switch between the add-source page's two tabs.
+    SwitchAddSource(wizard::Tab),
+    /// Install a bundled plugin by slug, leaving the source for later.
+    InstallBundled(String),
+    /// Open a plugin file and install it, leaving the source for later.
+    InstallFromFile,
+    /// Start configuring a source for an installed plugin.
+    SelectAddSourcePlugin(u64),
+    /// Go back from configuring a source to choosing its plugin.
+    AddSourceBack,
+    /// Create the source the page has been filled in for.
+    SubmitAddSource,
     /// Open a plugin's settings, so its parameters can be corrected without
     /// reinstalling it.
     EditSource(u64),

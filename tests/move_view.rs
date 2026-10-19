@@ -68,14 +68,7 @@ fn moving_a_view_up_reorders_the_next_snapshot() {
 
     assert_eq!(
         tabs(&opening),
-        [
-            "articles",
-            "social",
-            "pictures",
-            "videos",
-            "audios",
-            "notifications"
-        ]
+        ["articles", "social", "pictures", "videos", "audios"]
     );
 
     worker.send(Command::MoveView {
@@ -87,14 +80,7 @@ fn moving_a_view_up_reorders_the_next_snapshot() {
 
     assert_eq!(
         tabs(&moved),
-        [
-            "articles",
-            "pictures",
-            "social",
-            "videos",
-            "audios",
-            "notifications"
-        ]
+        ["articles", "pictures", "social", "videos", "audios"]
     );
 
     // Nothing was added or lost: a reorder is a permutation, and a row that
@@ -136,13 +122,13 @@ fn a_move_survives_the_worker_restarting() {
         let _ = next_snapshot(&worker);
 
         worker.send(Command::MoveView {
-            view: View::Notifications,
+            view: View::Audios,
             delta: -1,
         });
 
         let moved = next_snapshot(&worker);
 
-        assert_eq!(moved.tabs[4].view, View::Notifications);
+        assert_eq!(moved.tabs[3].view, View::Audios);
 
         // Dropping the handle closes the command channel, which is how the
         // worker is told to stop.
@@ -151,16 +137,9 @@ fn a_move_survives_the_worker_restarting() {
     let worker = Worker::start(dir.join("rome.db"), &MIGRATIONS);
     let reopened = next_snapshot(&worker);
 
-    assert_eq!(reopened.tabs[4].view, View::Notifications);
+    assert_eq!(reopened.tabs[3].view, View::Audios);
     assert_eq!(
         tabs(&reopened),
-        [
-            "articles",
-            "social",
-            "pictures",
-            "videos",
-            "notifications",
-            "audios"
-        ]
+        ["articles", "social", "pictures", "audios", "videos"]
     );
 }

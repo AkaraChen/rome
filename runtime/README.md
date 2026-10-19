@@ -65,7 +65,7 @@ silently when the interface moves.
 
 ### `fetch(ctx)` — required
 
-Called every time Rome refreshes the source. Return `{ entries, cursor? }`.
+Called every time Rome refreshes the source. Return `{ entries, cursor?, icon? }`.
 
 ```js
 export async function fetch(ctx) {
@@ -78,13 +78,17 @@ export async function fetch(ctx) {
     const items = await response.json();
 
     return {
+        // The source's own mark. Optional; when omitted, the source keeps
+        // whatever icon it had (and falls back to the plugin's).
+        icon: "https://example.com/favicon.ico",
         entries: items.map(item => ({
             id: `example:${item.uuid}`,   // see below — this must be stable
             title: item.name,
             url: item.html_url,
             author: item.owner.login,
             publishedAt: Math.floor(Date.parse(item.created_at) / 1000),
-            summary: item.description
+            summary: item.description,
+            icon: item.owner.avatar_url   // optional, see "Icons" below
         }))
     };
 }
@@ -166,10 +170,29 @@ in `ctx.storage`, not in a top-level `let`.
     publishedAt: 1717236000,   // optional, unix seconds (not milliseconds)
     content: "<p>…</p>",       // optional, the full body, HTML or text
     summary: "412 points · 87 comments", // optional, one line, shown in lists
-    image: "https://…",        // optional, absolute URL
+    image: "https://…",        // optional, absolute URL, the item's cover
+    icon: "https://…",         // optional, absolute URL, the item's mark
     params: { bvid: "BV1…" },  // optional, handed back to `preview` for this item
 }
 ```
+
+### Icons
+
+Three places can declare an icon, and the host draws the first one it finds:
+
+1. the entry's `icon`, from `fetch`;
+2. the source's `icon`, from the same `fetch` result;
+3. the plugin's `icon`, from its manifest.
+
+So an entry that says nothing about its icon inherits the source's, and a source that says
+nothing inherits the plugin's. Set an icon at the level that actually varies: a plugin that
+reads one site needs only the manifest icon, while a plugin that reads many sites can return
+a different `icon` per source, and one that aggregates other sites can set it per entry.
+
+The host resolves nothing beyond that. An icon is an absolute URL to a small image
+(`png`, `jpeg`, `gif`, `webp`, `bmp`, `tiff`, `ico` or `svg`); it is loaded anonymously by the
+image client, the same way a cover is, and a URL that does not load leaves the glyph in its
+place. Do not point it at something large — it is drawn at 20–40 pixels.
 
 `publishedAt` is **unix seconds**. `Date.now() / 1000`, not `Date.now()`. A `Date` object is
 accepted and converted for you, but a number is clearer. Entries without a `publishedAt` sort

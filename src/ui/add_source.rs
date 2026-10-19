@@ -1,143 +1,33 @@
-//! Adding a source: pick a plugin file, say what it should read, install it.
+//! Installing a plugin from a file, and editing what is already installed.
 //!
-//! The flow starts in the window rather than the worker because there is
-//! nothing for the worker to do until there is a file to point at. Once there
-//! is, the file is read by the worker — installing means running the plugin, so
-//! it belongs on the thread that can afford to wait for it.
+//! The add-source page lives in [`super::wizard`]. What is left here is the
+//! half that starts at the platform's file picker: a file has
+//! to be described before it can be offered, and describing it is the worker's
+//! job because describing means running it. The dialogs that correct an
+//! installed source or plugin stay here too — they are the same kind of
+//! question, asked about something that already exists.
 
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::component::dialog::{DialogButtonProps, DialogContent};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{ActiveTheme, WindowExt, v_flex};
+use gpui_kit::component::{ActiveTheme, WindowExt};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::plugin::session::Manifest;
 use crate::worker::{Command, Worker};
 
 use super::form::{self, Form};
 
-/// Ask where the next plugin should come from.
-///
-/// A chooser rather than the platform's file picker directly, because a fresh
-/// install has nothing to read and no way to find out what a plugin is meant to
-/// look like: the examples are compiled into the app, and this is the only place
-/// they can be reached from. The picker is still one button away, because a
-/// plugin the user wrote or downloaded is what this product is actually for.
-pub fn choose(window: &mut Window, cx: &mut App, worker: Worker) {
-    use gpui_kit::component::dialog::DialogContent;
-
-    window.open_alert_dialog(cx, move |dialog, _, _| {
-        let examples = worker.clone();
-        let file = worker.clone();
-
-        dialog
-            .w(px(460.))
-            .title("安装插件")
-            .button_props(
-                DialogButtonProps::default()
-                    .ok_text("从文件安装…")
-                    .cancel_text("取消")
-                    .show_cancel(true),
-            )
-            .content({
-                let examples = examples.clone();
-
-                move |content: DialogContent, _, cx| {
-                    content
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("内置示例"),
-                        )
-                        .child(v_flex().w_full().gap_1().mt_1().children(
-                            crate::bundled::ALL.iter().map(|example| {
-                                let worker = examples.clone();
-
-                                example_row(example, cx).on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    describe_bundled(example.slug, window, cx, worker.clone());
-                                })
-                            }),
-                        ))
-                        .child(
-                            div()
-                                .mt_3()
-                                .text_xs()
-                                .line_height(px(18.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(
-                                    "示例插件是编译进 Rome 的，装的时候会在数据目录里写一份副本，\
-                                     安装后可以打开读它的源码。",
-                                ),
-                        )
-                }
-            })
-            .on_ok(move |_, window, cx| {
-                pick_file(window, cx, file.clone());
-                true
-            })
-    });
-}
-
-/// One example in the chooser: what it is called, and what it is for.
-///
-/// Not a [`Button`]: the two lines are the point — a name alone says nothing
-/// about which example teaches what — and a button draws a label, not a block
-/// of text.
-fn example_row(example: &crate::bundled::Bundled, cx: &App) -> Stateful<Div> {
-    div()
-        .id(example.slug)
-        .w_full()
-        .px_2()
-        .py_1p5()
-        .rounded_md()
-        .cursor_pointer()
-        .hover(|this| this.bg(cx.theme().accent.opacity(0.08)))
-        .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().foreground)
-                .child(example.name),
-        )
-        .child(
-            div()
-                .text_xs()
-                .line_height(px(18.))
-                .text_color(cx.theme().muted_foreground)
-                .child(example.about),
-        )
-}
-
-/// Write a compiled-in example out and hand it to the worker as a path.
-///
-/// The write happens here, in the window, rather than as its own command. It is
-/// not work that can block on anything but the disk, and putting it on the
-/// worker would mean a second way to describe a plugin — one that takes source
-/// instead of a path — which is one more thing that could fall out of step with
-/// the way a real install works.
-fn describe_bundled(slug: &str, window: &mut Window, cx: &mut App, worker: Worker) {
-    let Some(example) = crate::bundled::get(slug) else {
-        return;
-    };
-
-    match crate::paths::write_bundled_plugin(example.slug, example.code) {
-        Ok(path) => worker.send(Command::Describe { path }),
-        Err(error) => {
-            super::dialog::notify(&format!("写不出示例插件：{error}"), "error", window, cx);
-        }
-    }
-}
-
 /// Ask the user for a plugin file and describe it.
 ///
 /// The picker is the platform's own — GPUI exposes it through
 /// [`App::prompt_for_paths`] and there is no `rfd` dependency to add. The task
 /// outlives the click, which is why the worker handle is cloned into it.
-fn pick_file(window: &mut Window, cx: &mut App, worker: Worker) {
+pub fn pick_file(window: &mut Window, cx: &mut App, worker: Worker) {
     let options = PathPromptOptions {
         files: true,
         directories: false,
@@ -168,89 +58,84 @@ fn pick_file(window: &mut Window, cx: &mut App, worker: Worker) {
     task.detach();
 }
 
-/// Show the install dialog for a described plugin.
+/// Show the confirmation for a described plugin.
 ///
 /// `manifest` came back from the worker, which read it out of the file at
 /// `path`; both are handed straight back on install so the worker does not have
 /// to read and describe the file twice.
-pub fn install(
+///
+/// The dialog reads the file's manifest rather than asking for a name and a
+/// form, because installing and subscribing are now separate decisions. What
+/// the user is agreeing to here is running this code, and the two facts that
+/// belong to that decision are what the plugin calls itself and what it says it
+/// does. Everything about a subscription is the wizard's.
+pub fn confirm_install(
     path: PathBuf,
     manifest: Manifest,
     window: &mut Window,
     cx: &mut App,
     worker: Worker,
 ) {
-    let title = cx.new(|cx| {
-        InputState::new(window, cx)
-            .placeholder(manifest.name.clone())
-            .default_value(manifest.name.clone())
-    });
-
-    // `Rc` because a dialog's builder is an `Fn`: it may run again when the
-    // dialog layer is rebuilt, so nothing inside it may be consumed by the
-    // first run.
-    let params = Rc::new(Form::new(&manifest.params, &Value::Null, window, cx));
-    let settings = Rc::new(Form::new(&manifest.settings, &Value::Null, window, cx));
-
-    let focus = title.read(cx).focus_handle(cx);
-    window.defer(cx, move |window, cx| focus.focus(window, cx));
-
     let name = manifest.name.clone();
+    let description = manifest
+        .description
+        .clone()
+        .filter(|description| !description.trim().is_empty());
     let file = path.display().to_string();
 
     window.open_alert_dialog(cx, move |dialog, _, _| {
         // Separate bindings for the builder and for the button: both closures
-        // must be `Fn`, and a `move` that consumes the entity would leave the
+        // must be `Fn`, and a `move` that consumes a value would leave the
         // second one with nothing to clone.
         let content_name = name.clone();
+        let content_description = description.clone();
         let content_file = file.clone();
-        let content_title = title.clone();
-        let content_params = params.clone();
-        let content_settings = settings.clone();
 
-        let content = move |mut content: DialogContent, _: &mut Window, cx: &mut App| {
-            content = content
+        let content = move |content: DialogContent, _: &mut Window, cx: &mut App| {
+            content
                 .child(label("插件", cx))
                 .child(
                     div()
-                        .text_sm()
+                        .text_base()
+                        .line_height(px(24.))
+                        .font_weight(FontWeight(450.))
                         .text_color(cx.theme().foreground)
                         .child(content_name.clone()),
                 )
+                .when_some(content_description.clone(), |this, description| {
+                    this.child(
+                        div()
+                            .mt_1()
+                            .text_sm()
+                            .line_height(px(22.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(description),
+                    )
+                })
                 .child(
                     div()
-                        .text_xs()
+                        .mt_2()
+                        .text_size(px(crate::theme::LABEL))
                         .font_family("monospace")
                         .text_color(cx.theme().muted_foreground)
                         .child(content_file.clone()),
                 )
-                .child(div().mt_2().child(label("名称", cx)))
-                .child(Input::new(&content_title).bordered(true));
-
-            if !content_params.is_empty() {
-                content = content
-                    .child(div().mt_2().child(label("要抓取什么", cx)))
-                    .child(content_params.render(cx));
-            }
-
-            if !content_settings.is_empty() {
-                content = content
-                    .child(div().mt_2().child(label("设置", cx)))
-                    .child(content_settings.render(cx));
-            }
-
-            content
+                .child(
+                    div()
+                        .mt_3()
+                        .text_size(px(crate::theme::LABEL))
+                        .line_height(px(18.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("装好后，到「添加信息源」里给它添加订阅。"),
+                )
         };
 
-        let ok = worker.clone();
+        let install = worker.clone();
         let path = path.clone();
-        let ok_title = title.clone();
-        let ok_params = params.clone();
-        let ok_settings = settings.clone();
 
         dialog
-            .w(px(480.))
-            .title("添加信息源")
+            .w(px(460.))
+            .title("安装插件")
             .button_props(
                 DialogButtonProps::default()
                     .ok_text("安装")
@@ -258,23 +143,8 @@ pub fn install(
                     .show_cancel(true),
             )
             .content(content)
-            .on_ok(move |_, _, cx| {
-                ok.send(Command::Install {
-                    path: path.clone(),
-                    title: ok_title.read(cx).value().to_string(),
-                    // An empty form is not "no settings" — it is a plugin that
-                    // declared none, and `{}` says so without a special case.
-                    settings: if ok_settings.is_empty() {
-                        json!({})
-                    } else {
-                        ok_settings.value(cx)
-                    },
-                    params: if ok_params.is_empty() {
-                        json!({})
-                    } else {
-                        ok_params.value(cx)
-                    },
-                });
+            .on_ok(move |_, _, _| {
+                install.send(Command::InstallPlugin { path: path.clone() });
                 true
             })
     });

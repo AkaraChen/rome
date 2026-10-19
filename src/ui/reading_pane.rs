@@ -123,7 +123,7 @@ pub fn pane(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
         return placeholder(
             PhosphorIcon::BookOpen.regular(),
             "没有打开的条目",
-            "从中间的列表里选一条，内容会显示在这里",
+            "从列表里选一条，内容会显示在这里",
             None,
             cx,
         );
@@ -131,7 +131,7 @@ pub fn pane(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
 
     // Parsed once, so the toolbar's copy action and the body are looking at
     // exactly the same text.
-    let parsed = without_repeated_title(content::parse(body_html(entry)), &entry.title);
+    let parsed = without_repeated_title(content::parse(entry.body_html()), &entry.title);
 
     v_flex()
         .size_full()
@@ -150,28 +150,6 @@ fn selected_source(snapshot: &Snapshot) -> u64 {
         crate::snapshot::Selection::Source(id) => id,
         _ => 0,
     }
-}
-
-/// The HTML the body should be drawn from.
-///
-/// Three sources, in order of how much they are the entry rather than a note
-/// about it. The plugin's own page for the item is the best thing the app can
-/// have: it was made by the code that listed the item, from the item's own
-/// parameters, and it is the only source that knows what the item *is*. What
-/// the plugin said in the list comes next. The summary is what is left — for an
-/// aggregator that is a score and a comment count, which is not a body at all
-/// but is better than an empty pane, which would look like a bug.
-fn body_html(entry: &EntryDetail) -> &str {
-    if let Body::Read(page) = &entry.preview {
-        return page;
-    }
-
-    entry
-        .content
-        .as_deref()
-        .filter(|content| !content.trim().is_empty())
-        .or(entry.summary.as_deref())
-        .unwrap_or_default()
 }
 
 /// The parsed body, without an opening heading that is only the title again.

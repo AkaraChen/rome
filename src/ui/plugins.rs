@@ -29,7 +29,7 @@ pub fn pane(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
             .child(placeholder(
                 PhosphorIcon::PuzzlePiece.regular(),
                 "还没有装插件",
-                "信息源来自插件。点右上角的「安装插件」：装一个内置示例，或者从文件里挑一个 .js。装上之后它抓到的东西就成了一个信息源",
+                "信息源来自插件。点右上角的「插件市场」：从内置插件里挑一个，或者从文件安装一个 .js。装好之后去「添加信息源」里添加订阅",
                 None,
                 cx,
             ))
@@ -59,10 +59,9 @@ pub fn pane(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
 
 /// The strip at the top of the screen.
 ///
-/// Installing from here as well as from the sidebar because this is where a
-/// user who is thinking about plugins already is; sending them back to the
-/// sidebar to add one would be a detour through a screen that is about
-/// something else.
+/// The way to install more is the market page, not a dialog: the same button in
+/// the sidebar opens it, and a user who is thinking about plugins is the one
+/// most likely to want the whole list rather than a file picker.
 fn header(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
     // How many are broken, so the strip says whether the screen needs reading
     // at all. Counting here rather than in the worker keeps a number that is
@@ -78,7 +77,7 @@ fn header(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
         count => format!("{} 个插件 · {} 个有问题", snapshot.plugins.len(), count),
     };
 
-    let install = dispatch.clone();
+    let market = dispatch.clone();
     let retry = dispatch.clone();
 
     h_flex()
@@ -124,12 +123,12 @@ fn header(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
                 }),
         )
         .child(
-            Button::new("plugins-install")
+            Button::new("plugins-market")
                 .xsmall()
-                .icon(Icon::new(PhosphorIcon::Plus.regular()))
-                .label("安装插件")
+                .icon(Icon::new(PhosphorIcon::Storefront.regular()))
+                .label("插件市场")
                 .on_click(move |_, window, cx| {
-                    install(Action::AddSource, window, cx);
+                    market(Action::OpenPluginMarket, window, cx);
                 }),
         )
         .into_any_element()
@@ -197,6 +196,11 @@ fn card(plugin: &PluginRow, dispatch: &Dispatch, cx: &App) -> AnyElement {
                 .w_full()
                 .gap_2()
                 .items_start()
+                // No leading mark here, deliberate: this column is narrow and
+                // the three actions at the end leave the name about eighty
+                // pixels before the metadata. A 32px icon took enough of that
+                // to truncate "Hacker News", and the icon is already shown
+                // where the plugin is chosen and where it is installed.
                 .child(
                     v_flex()
                         .flex_1()

@@ -55,12 +55,15 @@ use gpui_kit::{
 
 use rome::models::View;
 use rome::plugin::DialogRequest;
+use rome::plugin::session::Manifest;
 use rome::snapshot::{
     Body, EntryDetail, EntryRow, ListRow, PluginRow, Selection, Snapshot, SourceRow, Tab,
 };
 use rome::ui::add_source;
-use rome::ui::app::RomeApp;
+use rome::ui::app::{Mode, RomeApp};
 use rome::ui::dialog;
+use rome::ui::wizard::Tab as AddSourceTab;
+use rome::view_order;
 use rome::worker::{Ask, Worker};
 use toasty::migration::MigrationSet;
 
@@ -78,6 +81,9 @@ const LARGE: Frame = (1920.0, 1200.0);
 /// A small window. Layouts break at the small end long before they break at the
 /// large one, and nobody resizes a window down to find out.
 const SMALL: Frame = (1100.0, 720.0);
+/// Narrower again, which is where the market's grid has to drop a column and
+/// stop being a row of cards that cannot fit.
+const COMPACT: Frame = (900.0, 720.0);
 
 /// Where the PNGs go.
 fn shot_dir() -> PathBuf {
@@ -109,7 +115,7 @@ fn worker(name: &str) -> Worker {
 /// entry with no image, one source carrying an error, an unread count on every
 /// row. An empty window renders beautifully and says nothing.
 fn fixture() -> Snapshot {
-    let entries = vec![
+    let mut entries = vec![
         entry(
             1,
             "用 Rust 重写一个阅读器：为什么我放弃了 Electron",
@@ -185,6 +191,11 @@ fn fixture() -> Snapshot {
         ),
     ];
 
+    // Two rows carry a mark, so the article list's icon column is in a frame;
+    // the rest have none, which is what most feeds produce.
+    entries[0].icon = Some("https://sspai.com/favicon.ico".to_owned());
+    entries[3].icon = Some("https://news.ycombinator.com/favicon.ico".to_owned());
+
     Snapshot {
         tabs: vec![
             Tab {
@@ -205,10 +216,6 @@ fn fixture() -> Snapshot {
             },
             Tab {
                 view: View::Audios,
-                unread: 0,
-            },
-            Tab {
-                view: View::Notifications,
                 unread: 0,
             },
         ],
@@ -236,13 +243,38 @@ fn fixture() -> Snapshot {
                 name: "Hacker News".to_owned(),
                 version: "1.0.0".to_owned(),
                 description: Some("最小的抓取型：一次请求，一个数组，一次映射".to_owned()),
+                icon: Some("https://news.ycombinator.com/favicon.ico".to_owned()),
                 enabled: true,
                 sources: 1,
                 error: None,
                 recent_domains: vec!["news.ycombinator.com".to_owned()],
                 settings: json!({}),
                 settings_schema: json!({ "fields": [] }),
-                params_schema: json!({ "fields": [] }),
+                // The configure step draws whatever the plugin asked
+                // for. The real Hacker News plugin takes no parameters, but a
+                // fixture with an empty form would never show the controls the
+                // step exists to draw.
+                params_schema: json!({
+                    "fields": [
+                        {
+                            "key": "query",
+                            "label": "关键词",
+                            "placeholder": "留空则读取首页",
+                            "help": "只保留标题里含有这个词的故事。"
+                        },
+                        {
+                            "key": "sort",
+                            "label": "排序",
+                            "type": "select",
+                            "default": "hot",
+                            "options": [
+                                { "value": "hot", "label": "热度" },
+                                { "value": "new", "label": "最新" }
+                            ]
+                        }
+                    ],
+                    "ok": "添加"
+                }),
             },
             PluginRow {
                 id: 6,
@@ -250,6 +282,7 @@ fn fixture() -> Snapshot {
                 name: "Lobsters".to_owned(),
                 version: "1.0.0".to_owned(),
                 description: Some("最小的正确形状：一次请求，一个数组，一次映射".to_owned()),
+                icon: None,
                 enabled: true,
                 sources: 1,
                 error: Some("unexpected token at line 1".to_owned()),
@@ -284,10 +317,39 @@ fn fixture() -> Snapshot {
             summary: Some("从内存占用到打包体积。".to_owned()),
             preview: Body::Idle,
             image: Some("https://picsum.photos/seed/rome1/1200/600".to_owned()),
+            icon: None,
             source_title: "少数派".to_owned(),
             read: true,
             starred: true,
         }),
+        busy: false,
+        busy_with: None,
+        error: None,
+    }
+}
+
+/// A first launch, as the worker would publish it: all five sidebar rows and
+/// nothing else.
+///
+/// `Snapshot::default()` is not this state — it has no tabs at all, which the
+/// worker never sends, and a page drawn over it shows a sidebar missing the
+/// rows every real window has. The rows come from `view_order`, so a frame
+/// stays honest if a view is ever added.
+fn fresh() -> Snapshot {
+    Snapshot {
+        tabs: view_order::resolve(None)
+            .into_iter()
+            .map(|view| Tab { view, unread: 0 })
+            .collect(),
+        unread: 0,
+        starred: 0,
+        sources: Vec::new(),
+        plugins: Vec::new(),
+        lists: Vec::new(),
+        selection: Selection::All,
+        search: None,
+        entries: Vec::new(),
+        open: None,
         busy: false,
         busy_with: None,
         error: None,
@@ -333,6 +395,7 @@ fn open_preview(preview: Body) -> Snapshot {
         summary: Some("312 分 · 84 条评论".to_owned()),
         preview,
         image: None,
+        icon: Some("https://news.ycombinator.com/favicon.ico".to_owned()),
         source_title: "Hacker News".to_owned(),
         read: true,
         starred: false,
@@ -341,12 +404,101 @@ fn open_preview(preview: Body) -> Snapshot {
     snapshot
 }
 
-/// The same window showing a view whose middle column is a grid rather than a
-/// stack of headlines. A different list, and so a different set of things to
-/// get wrong.
-fn pictures() -> Snapshot {
+/// The same entries, arranged for one of the full-width feeds.
+///
+/// Three things change from the article fixture. The selection names the view,
+/// so the window chooses that view's layout; nothing is open, because the
+/// default state of every feed is one with nothing selected; and every entry
+/// gets a cover and an author, because the fixture deliberately omits both on
+/// some rows to exercise the article list's missing-image path and a feed frame
+/// full of placeholders would show the fallbacks instead of the layout.
+fn feed(view: View) -> Snapshot {
     let mut snapshot = fixture();
-    snapshot.selection = Selection::View(View::Pictures);
+    snapshot.selection = Selection::View(view);
+    snapshot.open = None;
+
+    // A view selection only ever contains entries from sources filed under it,
+    // so the fixture has to file them too. Without this the audio page has
+    // episodes but no shows, which is a state the database cannot produce.
+    for source in &mut snapshot.sources {
+        source.view = view;
+    }
+
+    // The shape each view draws its cover in: videos are 16:9, pictures are
+    // portrait, show art is square.
+    let size = match view {
+        View::Videos => "1600/900",
+        View::Pictures => "900/1200",
+        View::Audios => "900/900",
+        _ => "1200/900",
+    };
+
+    let authors = [
+        "林檎", "dhouston", "someone", "patio11", "Livid", "jcs", "李四",
+    ];
+
+    for (index, entry) in snapshot.entries.iter_mut().enumerate() {
+        entry.author = Some(authors[index % authors.len()].to_owned());
+        entry.image = Some(format!("https://picsum.photos/seed/feed{index}/{size}"));
+    }
+
+    snapshot
+}
+
+/// The picture view's grid.
+fn pictures() -> Snapshot {
+    feed(View::Pictures)
+}
+
+/// The social view with a post open: the timeline on the left, the post in the
+/// reading pane on the right.
+///
+/// A post is read in place, so this frame is the social view's normal state
+/// rather than a detail somebody asked for.
+fn social_open() -> Snapshot {
+    let mut snapshot = feed(View::SocialMedia);
+
+    snapshot.open = Some(EntryDetail {
+        id: 1,
+        title: "用 Rust 重写一个阅读器：为什么我放弃了 Electron".to_owned(),
+        url: Some("https://sspai.com/post/1".to_owned()),
+        author: Some("林檎".to_owned()),
+        published_at: Some(now() - 3600 * 5),
+        content: Some(LONG_BODY.to_owned()),
+        summary: Some("从内存占用到打包体积。".to_owned()),
+        preview: Body::Idle,
+        image: Some("https://picsum.photos/seed/rome1/1200/600".to_owned()),
+        icon: None,
+        source_title: "少数派".to_owned(),
+        read: true,
+        starred: true,
+    });
+
+    snapshot
+}
+
+/// The picture view with one note open: the image on the left, the caption on
+/// the right. The one feed interaction a snapshot can reach, because it is
+/// drawn from `open` rather than opened on the window.
+fn picture_detail() -> Snapshot {
+    let mut snapshot = feed(View::Pictures);
+
+    snapshot.open = Some(EntryDetail {
+        id: 1,
+        title: "用 Rust 重写一个阅读器：为什么我放弃了 Electron".to_owned(),
+        url: Some("https://sspai.com/post/1".to_owned()),
+        author: Some("林檎".to_owned()),
+        published_at: Some(now() - 3600 * 5),
+        content: Some(LONG_BODY.to_owned()),
+        summary: Some("从内存占用到打包体积。".to_owned()),
+        preview: Body::Idle,
+        image: Some("https://picsum.photos/seed/note/900/1200".to_owned()),
+        icon: None,
+        source_title: "少数派".to_owned(),
+        read: true,
+        starred: true,
+    });
+
     snapshot
 }
 
@@ -378,6 +530,7 @@ fn entry(
         published_at: Some(now() - 3600 * (id as i64 + 1)),
         summary: Some(summary.to_owned()),
         image: image.map(str::to_owned),
+        icon: None,
         read,
         starred,
     }
@@ -395,12 +548,32 @@ fn source(
         id,
         plugin_id,
         title: title.to_owned(),
+        icon: None,
         view: View::Articles,
         category: category.map(str::to_owned),
         enabled: true,
         params: json!({}),
         unread,
         error: error.map(str::to_owned),
+    }
+}
+
+/// A described plugin, for the dialog that confirms installing one.
+///
+/// It is the shape the worker sends back from `Describe`, built by hand
+/// because the dialog only draws it.
+fn manifest() -> Manifest {
+    Manifest {
+        plugin_id: "rome.hacker-news".to_owned(),
+        name: "Hacker News".to_owned(),
+        version: "1.1.0".to_owned(),
+        api_version: "1".to_owned(),
+        description: Some("Hacker News 首页故事".to_owned()),
+        icon: None,
+        default_view: View::Articles,
+        settings: json!({ "fields": [] }),
+        params: json!({ "fields": [] }),
+        preview: true,
     }
 }
 
@@ -456,10 +629,22 @@ fn shoot(name: &str, frame: Frame, snapshot: Snapshot, look: Look) -> bool {
                 ..Default::default()
             },
             cx,
-            |_, cx| {
+            |window, cx| {
                 let mut app = RomeApp::new(worker(name));
                 app.set_snapshot(snapshot);
                 app.set_sidebar_collapsed(collapsed);
+
+                // The screens are window state rather than snapshot state, so a
+                // frame that needs one has to ask for it here, before the
+                // entity exists.
+                match look.screen {
+                    Screen::Browse => {}
+                    Screen::Plugins => app.set_mode(Mode::Plugins),
+                    Screen::AddSource => app.open_add_source(AddSourceTab::Installed),
+                    Screen::AddSourceMarket => app.open_add_source(AddSourceTab::Market),
+                    Screen::AddSourceConfigure(plugin) => app.configure_source(plugin, window, cx),
+                }
+
                 cx.new(|_| app)
             },
         )
@@ -499,7 +684,13 @@ fn shoot(name: &str, frame: Frame, snapshot: Snapshot, look: Look) -> bool {
                 window,
                 cx,
             ),
-            Overlay::Install => add_source::choose(window, cx, worker("install")),
+            Overlay::Install => add_source::confirm_install(
+                PathBuf::from("/Users/you/Library/Application Support/rome/bundled/hacker-news.js"),
+                manifest(),
+                window,
+                cx,
+                worker("install"),
+            ),
             Overlay::Prompt => dialog::prompt(
                 "新建列表",
                 "",
@@ -581,14 +772,28 @@ enum Overlay {
     /// A dialog whose footer is not the default one, because it has nothing to
     /// confirm.
     Pick,
-    /// The installer, which is the one with content of its own and a button
-    /// whose label is a sentence.
+    /// The installer's confirmation, which is the one that draws a manifest
+    /// rather than a form.
     Install,
     /// The dialog with a text field in it, which is the only frame that shows
     /// what an `Input` looks like: its border is a theme colour of its own, and
     /// the search box in the list column draws its own outline over the top of
     /// that one, so the list frames prove nothing about it.
     Prompt,
+}
+
+/// Which of the window's own screens to draw.
+///
+/// A snapshot cannot reach these: the mode and the add-source page's tab and
+/// step live in `RomeApp`, not in the data. A frame that needs one asks for it
+/// here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Browse,
+    Plugins,
+    AddSource,
+    AddSourceMarket,
+    AddSourceConfigure(u64),
 }
 
 /// What to draw, beyond the data: the things the window owns rather than the
@@ -599,6 +804,7 @@ struct Look {
     theme: Shot,
     collapsed: bool,
     overlay: Overlay,
+    screen: Screen,
 }
 
 impl Look {
@@ -606,18 +812,38 @@ impl Look {
         theme: Shot::Light,
         collapsed: false,
         overlay: Overlay::None,
+        screen: Screen::Browse,
     };
     const DARK: Self = Self {
         theme: Shot::Dark,
-        collapsed: false,
-        overlay: Overlay::None,
+        ..Self::LIGHT
     };
     /// The sidebar at its narrow width, where three things have to fit in 48
     /// pixels and none of them may spill.
     const NARROW: Self = Self {
-        theme: Shot::Light,
         collapsed: true,
-        overlay: Overlay::None,
+        ..Self::LIGHT
+    };
+    /// The plugin manager, which is where a broken plugin is read about.
+    const PLUGINS: Self = Self {
+        screen: Screen::Plugins,
+        ..Self::LIGHT
+    };
+    /// The add-source page on its installed tab, with two plugins to choose
+    /// from.
+    const ADD_SOURCE: Self = Self {
+        screen: Screen::AddSource,
+        ..Self::LIGHT
+    };
+    /// The page's other tab: the built-in market.
+    const ADD_SOURCE_MARKET: Self = Self {
+        screen: Screen::AddSourceMarket,
+        ..Self::LIGHT
+    };
+    /// The second step, with the form the plugin asked for.
+    const ADD_SOURCE_CONFIGURE: Self = Self {
+        screen: Screen::AddSourceConfigure(1),
+        ..Self::LIGHT
     };
     /// The app's own confirmation, over the window it would be asked in.
     const CONFIRM: Self = Self {
@@ -629,7 +855,7 @@ impl Look {
         overlay: Overlay::Pick,
         ..Self::LIGHT
     };
-    /// The installer, whose content is longer than any other dialog's.
+    /// The installer's confirmation, which is what a picked file lands on.
     const INSTALL: Self = Self {
         overlay: Overlay::Install,
         ..Self::LIGHT
@@ -650,7 +876,23 @@ fn main() {
         ("browse-dark", LAPTOP, fixture(), Look::DARK),
         ("browse-large", LARGE, fixture(), Look::LIGHT),
         ("browse-small", SMALL, fixture(), Look::LIGHT),
+        // The four browsed views, which are edge to edge rather than a list
+        // beside a pane. Each has its own shape and its own things to get
+        // wrong: a timeline's measure, a grid's row pitch, a cover's aspect
+        // ratio, a podcast home's two sections.
+        ("social", LAPTOP, feed(View::SocialMedia), Look::LIGHT),
+        // The same view with a post selected, which is how the two columns are
+        // meant to be used: scan on the left, read on the right.
+        ("social-open", LAPTOP, social_open(), Look::LIGHT),
+        ("videos", LAPTOP, feed(View::Videos), Look::LIGHT),
         ("pictures", LAPTOP, pictures(), Look::LIGHT),
+        ("audios", LAPTOP, feed(View::Audios), Look::LIGHT),
+        // The narrow window is where a computed column count earns its keep:
+        // four covers cannot stay four when the page is 845 pixels wide.
+        ("videos-small", SMALL, feed(View::Videos), Look::LIGHT),
+        ("pictures-small", SMALL, pictures(), Look::LIGHT),
+        // The one feed state that is not data: a note opened over its grid.
+        ("picture-detail", LAPTOP, picture_detail(), Look::LIGHT),
         ("collapsed", LAPTOP, fixture(), Look::NARROW),
         // An entry whose page the plugin had to draw, and the moment before it
         // has come back. Both are states only a real run reaches: the first is
@@ -669,8 +911,43 @@ fn main() {
             Look::LIGHT,
         ),
         // The first launch, which is the state most users see first and the one
-        // most likely to be left undesigned.
-        ("empty", LAPTOP, Snapshot::default(), Look::LIGHT),
+        // most likely to be left undesigned. The sidebar rows are still there,
+        // at zero: they come from the view order, not from having any data.
+        ("empty", LAPTOP, fresh(), Look::LIGHT),
+        // The two screens the sidebar's own buttons open. Adding a source and
+        // managing a plugin are different jobs; neither is a filter over
+        // entries, so neither can be a snapshot of a selection.
+        ("plugins", LAPTOP, fixture(), Look::PLUGINS),
+        // The add-source page, one tab at a time: the installed plugins to
+        // subscribe to, and the market to install more from.
+        ("add-source", LAPTOP, fixture(), Look::ADD_SOURCE),
+        (
+            "add-source-market",
+            LAPTOP,
+            fixture(),
+            Look::ADD_SOURCE_MARKET,
+        ),
+        // The market with fewer columns available, which is the frame that
+        // catches a grid whose card width is a minimum rather than a share.
+        (
+            "add-source-market-compact",
+            COMPACT,
+            fixture(),
+            Look::ADD_SOURCE_MARKET,
+        ),
+        // The page on a fresh install, where nothing is installed and the
+        // market is the only way forward.
+        ("add-source-empty", LAPTOP, fresh(), Look::ADD_SOURCE),
+        ("add-source-small", SMALL, fixture(), Look::ADD_SOURCE),
+        // The page's two steps. The first has no controls but the list; the
+        // second is the only frame that shows a plugin-declared form outside a
+        // dialog.
+        (
+            "add-source-configure",
+            LAPTOP,
+            fixture(),
+            Look::ADD_SOURCE_CONFIGURE,
+        ),
         // The overlays, which no fixture can reach.
         ("dialog-confirm", LAPTOP, fixture(), Look::CONFIRM),
         ("dialog-pick", LAPTOP, fixture(), Look::PICK),

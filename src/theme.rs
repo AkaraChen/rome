@@ -221,6 +221,18 @@ pub fn star() -> Hsla {
     rgb(0xffae00).into()
 }
 
+/// `surface-contrast`, for the scrim behind the picture detail.
+///
+/// Vercel publishes no modal scrim — its semantic layer has no dialog surface at
+/// all — and the theme's `overlay` field is `border-default`, an 8% black wash
+/// that is barely visible over a page. A picture detail needs a backdrop that
+/// actually recedes, so it takes the one surface that stays dark in both themes
+/// and applies its own alpha at the call site. The token is the colour; how much
+/// of the page shows through is a property of the overlay, not of the token.
+pub fn scrim() -> Hsla {
+    rgb(0x171717).into()
+}
+
 /// Install the Vercel theme for both modes.
 ///
 /// Call after `gpui_kit::init`, which creates the `Theme` global this replaces.

@@ -36,6 +36,8 @@ pub struct NewEntry {
     pub content: Option<String>,
     pub summary: Option<String>,
     pub image: Option<String>,
+    /// The item's own mark. See [`crate::models::Entry::icon`].
+    pub icon: Option<String>,
     /// The values the plugin wants handed back to its `preview` hook for this
     /// item. See [`crate::models::Entry::params`].
     pub params: Option<serde_json::Value>,
@@ -183,6 +185,7 @@ pub fn create_source(db: &mut Database, source: NewSource) -> toasty::Result<Sou
             toasty::create!(Source {
                 plugin_id: source.plugin_id,
                 title: source.title,
+                icon: None,
                 params: source.params,
                 view: source.view as i32,
                 category: source.category,
@@ -296,6 +299,19 @@ pub fn list_name(db: &mut Database, list_id: u64) -> toasty::Result<String> {
     })
 }
 
+/// What a run that succeeded handed back, beyond the entries themselves.
+#[derive(Debug, Clone, Default)]
+pub struct Fetched {
+    /// The continuation token for the next run, if the plugin gave one.
+    pub cursor: Option<String>,
+    /// The source's icon, if the plugin declared one this run.
+    ///
+    /// `None` leaves the previous icon alone: a plugin may only know the icon
+    /// after a redirect, and a run that has nothing to say about it should not
+    /// erase what an earlier run learned. An empty string clears it.
+    pub icon: Option<String>,
+}
+
 /// Record how a fetch went, so the sidebar can show a source that has stopped
 /// working.
 ///
@@ -305,7 +321,7 @@ pub fn list_name(db: &mut Database, list_id: u64) -> toasty::Result<String> {
 pub fn record_fetch(
     db: &mut Database,
     source_id: u64,
-    outcome: Result<Option<String>, String>,
+    outcome: Result<Fetched, String>,
 ) -> toasty::Result<()> {
     let timestamp = now();
 
@@ -314,9 +330,17 @@ pub fn record_fetch(
             let mut source = Source::get_by_id(&mut *conn, &source_id).await?;
 
             match outcome {
-                Ok(cursor) => {
+                Ok(fetched) => {
+                    let icon = fetched.icon.map(|icon| {
+                        let icon = icon.trim().to_owned();
+                        if icon.is_empty() { None } else { Some(icon) }
+                    });
+
+                    let source_icon = icon.unwrap_or_else(|| source.icon.clone());
+
                     toasty::update!(source {
-                        cursor,
+                        cursor: fetched.cursor,
+                        icon: source_icon,
                         last_fetched_at: Some(timestamp),
                         last_error: None,
                         last_error_at: None,
@@ -384,6 +408,7 @@ pub fn ingest(
                         content: new.content.clone(),
                         summary: new.summary.clone(),
                         image: new.image.clone(),
+                        icon: new.icon.clone(),
                         params: new.params.clone(),
                         read: false,
                         starred: false,
@@ -402,6 +427,7 @@ pub fn ingest(
                     || entry.content != new.content
                     || entry.summary != new.summary
                     || entry.image != new.image
+                    || entry.icon != new.icon
                     || entry.params != new.params;
 
                 if !changed {
@@ -417,6 +443,7 @@ pub fn ingest(
                     content: new.content.clone(),
                     summary: new.summary.clone(),
                     image: new.image.clone(),
+                    icon: new.icon.clone(),
                     params: new.params.clone(),
                 })
                 .exec(&mut *conn)

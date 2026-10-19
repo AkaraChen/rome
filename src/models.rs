@@ -22,6 +22,11 @@ use toasty::Deferred;
 /// Stored as an integer so the database does not depend on the Rust enum's
 /// layout. The numbering matches the order these are presented in, and a source
 /// never carries `All` — that is a filter over the others, not a shape.
+///
+/// There used to be a `Notifications = 5`. The discriminant is deliberately not
+/// reused: a source stored with `5` by an older release now resolves to
+/// `None` and is drawn as articles, which is a better answer than silently
+/// becoming whatever new shape took the number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum View {
@@ -30,17 +35,15 @@ pub enum View {
     Pictures = 2,
     Videos = 3,
     Audios = 4,
-    Notifications = 5,
 }
 
 impl View {
-    pub const ALL: [View; 6] = [
+    pub const ALL: [View; 5] = [
         View::Articles,
         View::SocialMedia,
         View::Pictures,
         View::Videos,
         View::Audios,
-        View::Notifications,
     ];
 
     pub fn from_i32(value: i32) -> Option<View> {
@@ -60,7 +63,6 @@ impl View {
             "pictures" | "photos" | "images" => Some(View::Pictures),
             "videos" | "video" => Some(View::Videos),
             "audios" | "audio" | "podcasts" => Some(View::Audios),
-            "notifications" => Some(View::Notifications),
             _ => None,
         }
     }
@@ -73,7 +75,6 @@ impl View {
             View::Pictures => "pictures",
             View::Videos => "videos",
             View::Audios => "audios",
-            View::Notifications => "notifications",
         }
     }
 }
@@ -178,6 +179,15 @@ pub struct Source {
     /// What the user calls this source. Starts as the plugin's name.
     pub title: String,
 
+    /// The icon the plugin declared for this subscription, if it declared one.
+    ///
+    /// Written by the last `fetch` that returned an `icon`, so a plugin that
+    /// reads one kind of site per source can give each its own face. It is
+    /// cleared only by the plugin returning an empty string; omitting `icon`
+    /// leaves the previous one in place. Presentation falls back to the
+    /// plugin's own icon when this is `None`.
+    pub icon: Option<String>,
+
     /// The parameters this instance runs with — which subreddit, which tags.
     /// The plugin defines the shape; nothing else reads inside it.
     #[column(type = text)]
@@ -240,6 +250,13 @@ pub struct Entry {
     pub content: Option<String>,
     pub summary: Option<String>,
     pub image: Option<String>,
+
+    /// The item's own icon, from the entry's `icon` field.
+    ///
+    /// A favicon-sized picture, not the item's cover: [`Entry::image`] is the
+    /// article's face and this is the mark of the thing that published it.
+    /// Presentation falls back to the source's icon, then the plugin's.
+    pub icon: Option<String>,
 
     /// What the plugin said to ask for this item's page by.
     ///

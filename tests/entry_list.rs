@@ -22,6 +22,7 @@ fn rows() -> Vec<EntryRow> {
             published_at: None,
             summary: None,
             image: None,
+            icon: None,
             read: false,
             starred: false,
         })

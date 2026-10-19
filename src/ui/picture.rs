@@ -25,8 +25,9 @@
 //! [`super::reading_pane`]; the lists are virtualised and only lay out the rows
 //! that are on screen.
 
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::*;
+use gpui_kit_phosphor::Phosphor;
 
 /// The shape a picture is assumed to have before it has arrived.
 ///
@@ -103,14 +104,90 @@ pub fn picture(url: impl Into<String>, cap: Pixels, cx: &App) -> AnyElement {
 ///
 /// `Cover` here, and the opposite of [`picture`]'s choice, because a tile is a
 /// grid cell and an image letterboxed inside one would leave the grid ragged.
-pub fn tile(url: impl Into<String>, cx: &App) -> AnyElement {
+///
+/// The radius is applied to the image itself rather than only to the box
+/// around it. `overflow_hidden` clips to a rectangle in GPUI, so a rounded
+/// parent with an unrounded child paints square corners: the child covers the
+/// parent's rounding. The image element takes the same radius as its empty
+/// state, and the box's own radius stays as the backdrop behind both.
+pub fn tile(url: impl Into<String>, radius: Pixels, cx: &App) -> AnyElement {
     let fill = cx.theme().muted;
 
     gpui_kit::img(url.into())
         .size_full()
         .object_fit(ObjectFit::Cover)
-        .with_loading(move || div().size_full().bg(fill).into_any_element())
+        .rounded(radius)
+        .with_loading(move || {
+            div()
+                .size_full()
+                .rounded(radius)
+                .bg(fill)
+                .into_any_element()
+        })
         .with_fallback(|| div().into_any_element())
+        .into_any_element()
+}
+
+/// A square mark for a plugin, a source or an entry.
+///
+/// `url` is already resolved — the caller has walked item → source → plugin —
+/// and `None` means none of them declared one. The glyph is the same answer for
+/// a missing icon and for a URL that does not decode: a favicon lives on a
+/// server that can go away, and a row whose leading mark vanished would be a
+/// row that cannot be recognised at all.
+///
+/// Radius is passed in because a timeline's avatar is a circle and a card's
+/// mark is not. A circle is not a third Vercel radius: it is half the square's
+/// own size.
+pub fn icon(
+    url: Option<&str>,
+    size: Pixels,
+    radius: Pixels,
+    fallback: Phosphor,
+    cx: &App,
+) -> AnyElement {
+    let fill = cx.theme().muted;
+    let glyph_color = cx.theme().muted_foreground;
+    let glyph_size = px((f32::from(size) * 0.45).max(12.));
+
+    let glyph = move || {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                Icon::new(fallback)
+                    .with_size(glyph_size)
+                    .text_color(glyph_color),
+            )
+            .into_any_element()
+    };
+
+    let content = match url {
+        Some(url) => gpui_kit::img(url.to_owned())
+            .size_full()
+            .object_fit(ObjectFit::Cover)
+            .rounded(radius)
+            // The glyph is also what waits. An empty grey square reads as a
+            // broken icon, and this is the same mark the reader would get if
+            // the request failed — so the tile never looks unfinished, it
+            // only changes.
+            // `glyph` is `Copy` — it captures only colours and a size — so
+            // handing it to both states is two copies, not a move.
+            .with_loading(glyph)
+            .with_fallback(glyph)
+            .into_any_element(),
+        None => glyph(),
+    };
+
+    div()
+        .size(size)
+        .flex_shrink_0()
+        .rounded(radius)
+        .overflow_hidden()
+        .bg(fill)
+        .child(content)
         .into_any_element()
 }
 

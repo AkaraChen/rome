@@ -21,6 +21,7 @@ export const meta = {
   apiVersion: '1',
   view: 'articles',
   description: 'Hacker News 首页故事',
+  icon: 'https://news.ycombinator.com/favicon.ico',
 }
 
 // Rendered by Rome as this plugin's settings page. The plugin never draws this

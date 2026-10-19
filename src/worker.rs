@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use flume::{Receiver, RecvTimeoutError, Sender};
-use serde_json::Value;
+use serde_json::{Value, json};
 use toasty::migration::MigrationSet;
 
 use crate::db::Database;
@@ -84,11 +84,22 @@ pub enum Command {
     Describe {
         path: PathBuf,
     },
-    /// Install the plugin in `path` and subscribe to it.
-    Install {
+    /// Install or upgrade the plugin in `path`.
+    ///
+    /// Nothing is subscribed here. A plugin is code, a source is a decision
+    /// about what to read, and the two are made separately: most plugins want
+    /// several sources, and a plugin can be installed long before the reader
+    /// knows what to point it at.
+    InstallPlugin {
         path: PathBuf,
+    },
+    /// Create a source from an installed plugin, and select it.
+    ///
+    /// The view comes from the plugin's own manifest rather than from the
+    /// caller: the plugin is the one that knows what shape its entries are.
+    AddSource {
+        plugin_id: u64,
         title: String,
-        settings: Value,
         params: Value,
     },
     /// Switch a plugin on or off, running its lifecycle hook either way.
@@ -183,8 +194,8 @@ pub enum Event {
     /// A plugin's manifest, in answer to [`Command::Describe`].
     ///
     /// The path comes back with it so the UI can send it straight back to
-    /// [`Command::Install`] without having to remember which file it asked
-    /// about.
+    /// [`Command::InstallPlugin`] without having to remember which file it
+    /// asked about.
     Manifest {
         path: PathBuf,
         manifest: Box<Manifest>,
@@ -433,20 +444,25 @@ impl State {
                 Err(message) => self.error = Some(message),
             },
 
-            Command::Install {
-                path,
-                title,
-                settings,
-                params,
-            } => {
+            Command::InstallPlugin { path } => {
                 self.busy = Some("正在安装插件".to_owned());
                 self.publish(events);
 
-                if let Err(message) = self.install(path, title, settings, params, events, answers) {
+                if let Err(message) = self.install_plugin(path, events, answers) {
                     self.error = Some(message);
                 }
 
                 self.busy = None;
+            }
+
+            Command::AddSource {
+                plugin_id,
+                title,
+                params,
+            } => {
+                if let Err(message) = self.add_source(plugin_id, title, params, events) {
+                    self.error = Some(message);
+                }
             }
 
             Command::SetPluginEnabled { plugin_id, enabled } => {
@@ -696,10 +712,21 @@ impl State {
         let entry = store::entry(&mut self.db, entry_id).ok()?;
 
         let source = store::source(&mut self.db, entry.source_id).ok()?;
-        let source_title = source.title;
-        let plugin_preview = store::plugin(&mut self.db, source.plugin_id)
+        let plugin = store::plugin(&mut self.db, source.plugin_id).ok();
+        let plugin_preview = plugin
+            .as_ref()
             .map(|plugin| plugin.has_preview)
             .unwrap_or(false);
+
+        // The same chain the entry list resolved when it built the row: the
+        // item's own icon, then its source's, then the plugin's.
+        let icon = entry
+            .icon
+            .clone()
+            .or_else(|| source.icon.clone())
+            .or_else(|| plugin.and_then(|plugin| plugin.icon));
+
+        let source_title = source.title;
 
         // The plugin's own page, if it said it can draw one and has not been
         // asked for this entry yet. Nothing else is fetched: the host is not a
@@ -721,6 +748,7 @@ impl State {
             summary: entry.summary,
             preview: entry.preview.map_or(Body::Idle, Body::Read),
             image: entry.image,
+            icon,
             source_title,
             read: true,
             starred: entry.starred,
@@ -766,13 +794,17 @@ impl State {
         }
     }
 
-    /// Install a plugin and subscribe to it, in one step.
-    fn install(
+    /// Install a plugin, or upgrade one already installed.
+    ///
+    /// No source is created. The plugin's settings are not collected either:
+    /// they are one object shared by every source the plugin will ever have,
+    /// and an install is not the moment the reader is thinking about which
+    /// subscriptions they want. The bundled plugins all declare defaults, and a
+    /// plugin that needs something before it can run asks in `activate`, which
+    /// runs below with the dialog bridge attached.
+    fn install_plugin(
         &mut self,
         path: PathBuf,
-        title: String,
-        settings: Value,
-        params: Value,
         events: &Sender<Event>,
         answers: &Receiver<Answer>,
     ) -> Result<(), String> {
@@ -792,7 +824,9 @@ impl State {
                 icon: manifest.icon.clone(),
                 default_view: manifest.default_view,
                 source_code: code,
-                settings,
+                // Only read when the plugin is new; an upgrade keeps whatever
+                // the user filled in for the version already installed.
+                settings: json!({}),
                 settings_schema: manifest.settings.clone(),
                 params_schema: manifest.params.clone(),
                 has_preview: manifest.preview,
@@ -812,13 +846,39 @@ impl State {
             self.error = Some(format!("插件已安装，但启用失败：{error}"));
         }
 
+        // The market row flips from 安装 to 添加信息源 on the next snapshot,
+        // which is easy to miss; the notification is what says the click was
+        // heard.
+        let _ = events.send(Event::Notify {
+            message: format!("已安装「{}」", plugin.name),
+            level: "success".to_owned(),
+        });
+
+        Ok(())
+    }
+
+    /// Create a source from an installed plugin, then fetch it once.
+    fn add_source(
+        &mut self,
+        plugin_id: u64,
+        title: String,
+        params: Value,
+        events: &Sender<Event>,
+    ) -> Result<(), String> {
+        let plugin = store::plugin(&mut self.db, plugin_id)
+            .map_err(|error| format!("找不到插件：{error}"))?;
+
+        // An unknown view is a plugin written against a later version; its
+        // entries still deserve somewhere to land.
+        let view = View::from_i32(plugin.default_view).unwrap_or(View::Articles);
+
         let source = store::create_source(
             &mut self.db,
             NewSource {
-                plugin_id: plugin.id,
+                plugin_id,
                 title,
                 params,
-                view: manifest.default_view,
+                view,
                 category: None,
                 refresh_interval_secs: DEFAULT_INTERVAL.as_secs() as i64,
             },
@@ -827,6 +887,7 @@ impl State {
 
         self.selection = Selection::Source(source.id);
         self.search = None;
+        self.open = None;
 
         // Fetch once, so the source is not an empty box the user has to guess
         // about. A failure here is the source's own and shows on its row.
@@ -929,9 +990,29 @@ impl State {
 
     fn fill(&mut self, snapshot: &mut Snapshot) -> toasty::Result<()> {
         let sources = store::list_sources(&mut self.db)?;
+        let plugins = store::list_plugins(&mut self.db)?;
         let unread = store::unread_counts(&mut self.db)?;
         let lists = store::list_lists(&mut self.db)?;
         let counts = store::list_counts(&mut self.db)?;
+
+        // The icon chain is resolved here rather than in each renderer: an
+        // entry shows its own icon, else its source's, else its plugin's, and
+        // every surface that draws a row would otherwise have to walk the same
+        // three tables. The maps are small — one string per plugin and source.
+        let plugin_icons: HashMap<u64, Option<String>> = plugins
+            .iter()
+            .map(|plugin| (plugin.id, plugin.icon.clone()))
+            .collect();
+
+        let source_icons: HashMap<u64, Option<String>> = sources
+            .iter()
+            .map(|source| {
+                let own = source.icon.clone();
+                let inherited = plugin_icons.get(&source.plugin_id).cloned().flatten();
+
+                (source.id, own.or(inherited))
+            })
+            .collect();
 
         snapshot.unread = unread.total;
         snapshot.starred = unread.starred;
@@ -970,6 +1051,7 @@ impl State {
                 id: source.id,
                 plugin_id: source.plugin_id,
                 title: source.title.clone(),
+                icon: source_icons.get(&source.id).cloned().flatten(),
                 // A view the app no longer knows about lands in Articles
                 // rather than being dropped: a plugin written against a later
                 // version should still show its entries somewhere.
@@ -981,8 +1063,6 @@ impl State {
                 error: source.last_error.clone(),
             })
             .collect();
-
-        let plugins = store::list_plugins(&mut self.db)?;
 
         // Read once and hand the same slice to every row: the log is shared by
         // all plugins, and `recent_domains` is what narrows it to one.
@@ -996,6 +1076,7 @@ impl State {
                 name: plugin.name.clone(),
                 version: plugin.version.clone(),
                 description: plugin.description.clone(),
+                icon: plugin.icon.clone(),
                 enabled: plugin.enabled,
                 sources: sources
                     .iter()
@@ -1046,6 +1127,10 @@ impl State {
                 published_at: entry.published_at,
                 summary: entry.summary.clone(),
                 image: entry.image.clone(),
+                icon: entry
+                    .icon
+                    .clone()
+                    .or_else(|| source_icons.get(&entry.source_id).cloned().flatten()),
                 read: entry.read,
                 starred: entry.starred,
             })

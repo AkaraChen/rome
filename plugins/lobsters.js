@@ -20,6 +20,7 @@ export const meta = {
   apiVersion: '1',
   view: 'articles',
   description: 'Lobsters 技术社区的热门故事',
+  icon: 'https://lobste.rs/favicon.ico',
 }
 
 export const settings = {

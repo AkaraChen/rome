@@ -605,6 +605,8 @@ struct Fetched {
     entries: Vec<NewEntry>,
     /// The token to hand back next time, if the plugin gave one.
     cursor: Option<String>,
+    /// The icon this source should wear, if the plugin declared one.
+    icon: Option<String>,
 }
 
 impl Fetched {
@@ -625,6 +627,12 @@ impl Fetched {
             entries: parsed,
             cursor: result
                 .get("cursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            // A string is a declaration; anything else — including `null` —
+            // says nothing about the source's icon and leaves it alone.
+            icon: result
+                .get("icon")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         })
@@ -657,6 +665,7 @@ fn parse_entry(value: &Value, index: usize) -> Result<NewEntry, PluginError> {
         content: text("content"),
         summary: text("summary"),
         image: text("image"),
+        icon: text("icon"),
         // Opaque to the host; only an object, because it is handed back to the
         // plugin as a bag of named values and anything else would be a shape
         // the plugin's own `preview` could not read.
@@ -704,8 +713,8 @@ pub fn refresh_source(
     }
 
     match run(&plugin, &source, db, http, events) {
-        Ok((report, cursor)) => {
-            store::record_fetch(db, source_id, Ok(cursor)).map_err(environment)?;
+        Ok((report, fetched)) => {
+            store::record_fetch(db, source_id, Ok(fetched)).map_err(environment)?;
             Ok(report)
         }
         Err(error) => {
@@ -838,7 +847,7 @@ fn run(
     db: &mut Database,
     http: &mut Http,
     events: Option<&flume::Sender<Event>>,
-) -> Result<(IngestReport, Option<String>), PluginError> {
+) -> Result<(IngestReport, store::Fetched), PluginError> {
     // No dialogs: a refresh runs whether or not anyone is watching. Reports
     // still go out, because a refresh is the run that takes long enough to
     // need describing.
@@ -856,7 +865,13 @@ fn run(
 
     let report = store::ingest(db, source.id, &fetched.entries).map_err(environment)?;
 
-    Ok((report, fetched.cursor))
+    Ok((
+        report,
+        store::Fetched {
+            cursor: fetched.cursor,
+            icon: fetched.icon,
+        },
+    ))
 }
 
 /// The host services a plugin can reach, and the log it is filling.
@@ -1505,6 +1520,71 @@ export async function fetch(ctx) {
         assert_eq!(first.published_at, Some(1700000000));
         // A plugin cannot mark its own entries read, whatever it returns.
         assert!(!first.read);
+    }
+
+    /// Icons are kept at the level that declared them, so the host can walk
+    /// item → source → plugin when it draws a row.
+    ///
+    /// The manifest icon is stored by the installer and the other two by a
+    /// fetch; this test is about the fetch half, because it is the one that
+    /// runs on a schedule and can silently lose a field.
+    #[test]
+    fn icons_are_stored_at_the_level_that_declared_them() {
+        require_runtime!();
+
+        let mut scratch = Scratch::new();
+        let source_id = install(
+            &mut scratch.db,
+            r#"
+export const meta = {
+  id: 'test.plugin',
+  name: 'Test',
+  version: '1.0.0',
+  apiVersion: '1',
+  icon: 'https://example.com/plugin.png',
+}
+
+export async function fetch(ctx) {
+  return {
+    icon: 'https://example.com/source.png',
+    entries: [
+      { id: 'a', title: 'With a mark', icon: 'https://example.com/item.png' },
+      { id: 'b', title: 'Without one' },
+    ],
+  }
+}
+"#,
+        );
+
+        let mut http = Http::new();
+        refresh_source(&mut scratch.db, &mut http, source_id, None).expect("the refresh");
+
+        let source = store::source(&mut scratch.db, source_id).expect("the source");
+        assert_eq!(
+            source.icon.as_deref(),
+            Some("https://example.com/source.png")
+        );
+
+        let plugin = store::plugin(&mut scratch.db, source.plugin_id).expect("the plugin");
+        assert_eq!(
+            plugin.icon.as_deref(),
+            Some("https://example.com/plugin.png")
+        );
+
+        let entries =
+            store::timeline(&mut scratch.db, Some(View::Articles), 10).expect("a timeline");
+
+        let marked = entries
+            .iter()
+            .find(|entry| entry.external_id == "a")
+            .expect("the marked entry");
+        assert_eq!(marked.icon.as_deref(), Some("https://example.com/item.png"));
+
+        let plain = entries
+            .iter()
+            .find(|entry| entry.external_id == "b")
+            .expect("the plain entry");
+        assert_eq!(plain.icon, None);
     }
 
     /// The item's own parameters are what the preview hook is handed, and what

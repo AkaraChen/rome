@@ -26,10 +26,22 @@ use super::{Action, Dispatch};
 /// thing on this screen that is not a fact about the data. It lives in the
 /// window, because it is about this window — a reader who collapsed the sidebar
 /// to get a wider column did not ask for a setting.
-pub fn sidebar(snapshot: &Snapshot, collapsed: bool, dispatch: &Dispatch, cx: &App) -> AnyElement {
+///
+/// `active` is the selection that should look selected, or `None` when the
+/// window is showing a screen that is not a selection at all — the market, the
+/// plugin manager. The snapshot's own selection still says where the reader
+/// was, and leaving a row highlighted would claim the screen beside it is that
+/// selection.
+pub fn sidebar(
+    snapshot: &Snapshot,
+    collapsed: bool,
+    active: Option<Selection>,
+    dispatch: &Dispatch,
+    cx: &App,
+) -> AnyElement {
     // The tabs first: which list you are looking at is the question the sidebar
     // is answering, and everything below narrows that answer.
-    let mut sections = vec![view_tabs(snapshot, dispatch)];
+    let mut sections = vec![view_tabs(snapshot, active, dispatch)];
 
     // Above the sources it filters, which is where a reader looks for it, and
     // not a category of its own.
@@ -39,7 +51,7 @@ pub fn sidebar(snapshot: &Snapshot, collapsed: bool, dispatch: &Dispatch, cx: &A
         Selection::Starred,
         snapshot.starred,
         false,
-        snapshot.selection,
+        active,
         dispatch,
     )));
 
@@ -48,7 +60,7 @@ pub fn sidebar(snapshot: &Snapshot, collapsed: bool, dispatch: &Dispatch, cx: &A
             SidebarGroup::new(category.unwrap_or("未分类")).children(
                 sources
                     .into_iter()
-                    .map(|source| source_row(source, snapshot, dispatch)),
+                    .map(|source| source_row(source, active, dispatch)),
             ),
         );
     }
@@ -61,7 +73,7 @@ pub fn sidebar(snapshot: &Snapshot, collapsed: bool, dispatch: &Dispatch, cx: &A
                 snapshot
                     .lists
                     .iter()
-                    .map(|list| list_row(list, snapshot, dispatch)),
+                    .map(|list| list_row(list, active, dispatch)),
             )
             .child(new_list_row(dispatch)),
     );
@@ -198,7 +210,7 @@ fn header(collapsed: bool, dispatch: &Dispatch) -> AnyElement {
                     .small()
                     .icon(Icon::new(PhosphorIcon::Plus.regular()))
                     .label("添加信息源")
-                    .on_click(move |_, window, cx| open(Action::AddSource, window, cx)),
+                    .on_click(move |_, window, cx| open(Action::OpenAddSource, window, cx)),
             ),
         )
         .into_any_element()
@@ -242,7 +254,11 @@ fn footer(collapsed: bool, dispatch: &Dispatch) -> SidebarFooter {
 /// filter over the tabs rather than a position in their order. The move off
 /// either end is disabled rather than offered and ignored, for the same reason
 /// the notice rows are.
-fn view_tabs(snapshot: &Snapshot, dispatch: &Dispatch) -> SidebarGroup<SidebarMenuItem> {
+fn view_tabs(
+    snapshot: &Snapshot,
+    active: Option<Selection>,
+    dispatch: &Dispatch,
+) -> SidebarGroup<SidebarMenuItem> {
     // "全部" is a filter over the other tabs rather than a view of its own, so
     // it stands for a selection of its own kind.
     let mut tabs = vec![row(
@@ -251,7 +267,7 @@ fn view_tabs(snapshot: &Snapshot, dispatch: &Dispatch) -> SidebarGroup<SidebarMe
         Selection::All,
         snapshot.unread,
         false,
-        snapshot.selection,
+        active,
         dispatch,
     )];
 
@@ -268,7 +284,7 @@ fn view_tabs(snapshot: &Snapshot, dispatch: &Dispatch) -> SidebarGroup<SidebarMe
             Selection::View(view),
             tab.unread,
             false,
-            snapshot.selection,
+            active,
             dispatch,
         )
         .context_menu(move |menu, _, _| {
@@ -319,13 +335,13 @@ fn row(
     selection: Selection,
     count: usize,
     struck: bool,
-    active: Selection,
+    active: Option<Selection>,
     dispatch: &Dispatch,
 ) -> SidebarMenuItem {
     let dispatch = dispatch.clone();
     let item = SidebarMenuItem::new(label.to_owned())
         .icon(icon)
-        .active(active == selection)
+        .active(active == Some(selection))
         .suffix(count_suffix(count))
         .on_click(move |_, window, cx| {
             dispatch(Action::Worker(Command::Select(selection)), window, cx);
@@ -340,7 +356,7 @@ fn row(
 /// they are rare and, in one case, destructive: a row carrying a permanent
 /// delete button is a row that can be mis-clicked, and the sidebar has no width
 /// to spare for two more glyphs on every list the user has ever made.
-fn list_row(list: &ListRow, snapshot: &Snapshot, dispatch: &Dispatch) -> SidebarMenuItem {
+fn list_row(list: &ListRow, active: Option<Selection>, dispatch: &Dispatch) -> SidebarMenuItem {
     let select = dispatch.clone();
     let rename = dispatch.clone();
     let delete = dispatch.clone();
@@ -348,7 +364,7 @@ fn list_row(list: &ListRow, snapshot: &Snapshot, dispatch: &Dispatch) -> Sidebar
 
     SidebarMenuItem::new(list.name.clone())
         .icon(PhosphorIcon::ListBullets.regular())
-        .active(snapshot.selection == Selection::List(id))
+        .active(active == Some(Selection::List(id)))
         .suffix(count_suffix(list.count))
         .on_click(move |_, window, cx| {
             select(
@@ -398,7 +414,6 @@ pub fn view_label(view: View) -> &'static str {
         View::Pictures => "图片",
         View::Videos => "视频",
         View::Audios => "音频",
-        View::Notifications => "通知",
     }
 }
 
@@ -410,7 +425,6 @@ fn view_icon(view: View) -> Phosphor {
         View::Pictures => PhosphorIcon::Image.regular(),
         View::Videos => PhosphorIcon::VideoCamera.regular(),
         View::Audios => PhosphorIcon::MusicNotes.regular(),
-        View::Notifications => PhosphorIcon::Bell.regular(),
     }
 }
 
@@ -446,14 +460,18 @@ fn count_suffix(count: usize) -> impl Fn(&mut Window, &mut App) -> Div + 'static
 /// off, and one whose last fetch failed. Plugin health has to be readable from
 /// the sidebar without opening anything — a plugin breaking is the normal case
 /// in this product, not an exceptional one.
-fn source_row(source: &SourceRow, snapshot: &Snapshot, dispatch: &Dispatch) -> SidebarMenuItem {
+fn source_row(
+    source: &SourceRow,
+    active: Option<Selection>,
+    dispatch: &Dispatch,
+) -> SidebarMenuItem {
     let item = row(
         &source.title,
         PhosphorIcon::Rss.regular(),
         Selection::Source(source.id),
         source.unread,
         !source.enabled,
-        snapshot.selection,
+        active,
         dispatch,
     );
 

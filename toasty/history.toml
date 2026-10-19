@@ -39,3 +39,8 @@ snapshot_name = "0006_snapshot.toml"
 id = 820902772926431989
 name = "0007_drop_article.sql"
 snapshot_name = "0007_snapshot.toml"
+
+[[migrations]]
+id = 3155011099328364313
+name = "0008_source_and_entry_icons.sql"
+snapshot_name = "0008_snapshot.toml"

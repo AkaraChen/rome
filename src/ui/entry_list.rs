@@ -21,11 +21,10 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_kit_phosphor::PhosphorIcon;
 
-use crate::models::View;
 use crate::snapshot::{EntryRow, Selection, Snapshot};
 use crate::worker::Command;
 
-use super::{Action, Dispatch, picture};
+use super::{Action, Dispatch};
 
 // The focus handle the article list listens on.
 //
@@ -58,7 +57,11 @@ fn list_scroll() -> UniformListScrollHandle {
 }
 
 /// The heading the middle column is under, given what is selected.
-fn title(snapshot: &Snapshot) -> String {
+///
+/// Shared with the full-width feeds, which are under the same heading for the
+/// same reason: the sidebar says where the reader is, and the page says it once
+/// more at its own scale.
+pub(crate) fn title(snapshot: &Snapshot) -> String {
     if let Some(query) = &snapshot.search {
         return format!("搜索「{query}」");
     }
@@ -82,31 +85,6 @@ fn title(snapshot: &Snapshot) -> String {
     }
 }
 
-/// The view the selection's entries belong to, if it is one with a layout of
-/// its own.
-fn layout(snapshot: &Snapshot) -> View {
-    // A search runs across every view at once, so it gets the layout that can
-    // show anything. A grid would turn the text results into empty tiles and
-    // make the one thing the search found hardest to scan.
-    if snapshot.search.is_some() {
-        return View::Articles;
-    }
-
-    match snapshot.selection {
-        Selection::View(view) => view,
-        Selection::Source(id) => snapshot
-            .sources
-            .iter()
-            .find(|source| source.id == id)
-            .map(|source| source.view)
-            .unwrap_or(View::Articles),
-        // "全部" and a search mix every view together, so they get the layout
-        // that can show anything. A grid of pictures with no picture in it
-        // would be a worse answer than a list of headlines.
-        Selection::All | Selection::Starred | Selection::List(_) => View::Articles,
-    }
-}
-
 /// Build the middle column.
 pub fn column(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
     let body = match &snapshot.error {
@@ -118,12 +96,11 @@ pub fn column(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement 
             cx,
         ),
         None if snapshot.entries.is_empty() => empty_state(snapshot, cx),
-        None => match layout(snapshot) {
-            // No `cx`: the tiles are built inside the list's own render
-            // closure, which is handed one per frame.
-            View::Pictures => pictures(&snapshot.entries, snapshot, dispatch),
-            _ => articles(&snapshot.entries, snapshot, dispatch, cx),
-        },
+        // A search runs across every view at once and the remaining selections
+        // mix views together, so this column is always the headline layout.
+        // The views with a shape of their own are drawn edge to edge instead
+        // of here; see `super::feed`.
+        None => articles(&snapshot.entries, snapshot, dispatch, cx),
     };
 
     v_flex()
@@ -134,82 +111,25 @@ pub fn column(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement 
         .into_any_element()
 }
 
-/// The heading, the search field, what is being refreshed, and the things the
-/// user can do here.
+/// The heading row: what is selected, how much of it there is, and what can be
+/// done to it.
 ///
-/// Sources can be refreshed and removed from this column rather than from the
+/// Shared with the full-width feeds so the two layouts cannot drift apart on
+/// type size or on where the count sits. The count is on the title's line
+/// rather than under it: it is a number, not a second heading, and a stacked
+/// pair spends a line of the page on it.
+///
+/// Sources can be refreshed and removed from this row rather than only from the
 /// sidebar: the sidebar row has room for a name and a count, and hiding
 /// destructive actions behind a right-click is how people delete things by
 /// accident.
-fn header(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
-    let refresh = dispatch.clone();
-    let current = snapshot.selection;
-
-    let mut actions = h_flex().gap_1().flex_shrink_0();
-
-    if let Selection::Source(id) = current {
-        let enabled = snapshot
-            .sources
-            .iter()
-            .find(|source| source.id == id)
-            .map(|source| source.enabled);
-
-        let this = refresh.clone();
-        actions = actions.child(
-            Button::new("refresh-source")
-                .ghost()
-                .xsmall()
-                .icon(Icon::new(PhosphorIcon::ArrowsClockwise.regular()))
-                .tooltip("刷新")
-                .on_click(move |_, window, cx| {
-                    this(Action::Worker(Command::RefreshSource(id)), window, cx);
-                }),
-        );
-
-        if let Some(enabled) = enabled {
-            let this = refresh.clone();
-            actions = actions.child(
-                Button::new("toggle-source")
-                    .ghost()
-                    .xsmall()
-                    .label(if enabled { "暂停" } else { "恢复" })
-                    .on_click(move |_, window, cx| {
-                        this(
-                            Action::Worker(Command::SetSourceEnabled {
-                                source_id: id,
-                                enabled: !enabled,
-                            }),
-                            window,
-                            cx,
-                        );
-                    }),
-            );
-        }
-
-        let this = refresh.clone();
-        actions = actions.child(
-            Button::new("edit-source")
-                .ghost()
-                .xsmall()
-                .icon(Icon::new(PhosphorIcon::GearSix.regular()))
-                .tooltip("信息源设置")
-                .on_click(move |_, window, cx| {
-                    this(Action::EditSource(id), window, cx);
-                }),
-        );
-
-        let this = refresh.clone();
-        actions = actions.child(
-            Button::new("remove-source")
-                .ghost()
-                .xsmall()
-                .label("移除")
-                .on_click(move |_, window, cx| {
-                    this(Action::RemoveSource(id), window, cx);
-                }),
-        );
-    }
-
+pub(crate) fn heading(
+    snapshot: &Snapshot,
+    dispatch: &Dispatch,
+    unit: &str,
+    pad: Pixels,
+    cx: &App,
+) -> AnyElement {
     // A count of what is on screen, so a list that stops at the limit does not
     // quietly look like the whole feed.
     let count = snapshot.entries.len();
@@ -218,44 +138,129 @@ fn header(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
     } else if count == 0 {
         String::new()
     } else {
-        format!("{count} 条")
+        format!("{count} {unit}")
     };
 
+    h_flex()
+        .w_full()
+        .h(px(44.))
+        .items_center()
+        .gap_2()
+        .px(pad)
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_sm()
+                        .text_color(cx.theme().foreground)
+                        .child(title(snapshot)),
+                )
+                .when(!subtitle.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(subtitle),
+                    )
+                }),
+        )
+        .child(source_actions(snapshot, dispatch))
+        .into_any_element()
+}
+
+/// The middle column's header: the shared heading and the search field.
+fn header(snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
     v_flex()
         .flex_shrink_0()
         .border_b_1()
         .border_color(cx.theme().border)
-        .child(
-            h_flex()
-                .h(px(44.))
-                .items_center()
-                .gap_2()
-                .px_3()
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .truncate()
-                                .text_color(cx.theme().foreground)
-                                .child(title(snapshot)),
-                        )
-                        .when(!subtitle.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .text_xs()
-                                    .truncate()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(subtitle),
-                            )
-                        }),
-                )
-                .child(actions),
-        )
+        .child(heading(snapshot, dispatch, "条", px(12.), cx))
         .child(super::search::field(snapshot, dispatch, cx))
         .into_any_element()
+}
+
+/// What can be done to the selected source, if one is selected.
+///
+/// Shared with the full-width feeds: which view a source is in changes how its
+/// entries are drawn, not what can be done to the subscription. Refreshing and
+/// removing belong next to the entries rather than only in a sidebar row whose
+/// width has room for a name and a count.
+pub(crate) fn source_actions(snapshot: &Snapshot, dispatch: &Dispatch) -> AnyElement {
+    let mut actions = h_flex().gap_1().flex_shrink_0();
+
+    let Selection::Source(id) = snapshot.selection else {
+        return actions.into_any_element();
+    };
+
+    let enabled = snapshot
+        .sources
+        .iter()
+        .find(|source| source.id == id)
+        .map(|source| source.enabled);
+
+    let refresh = dispatch.clone();
+    actions = actions.child(
+        Button::new("refresh-source")
+            .ghost()
+            .xsmall()
+            .icon(Icon::new(PhosphorIcon::ArrowsClockwise.regular()))
+            .tooltip("刷新")
+            .on_click(move |_, window, cx| {
+                refresh(Action::Worker(Command::RefreshSource(id)), window, cx);
+            }),
+    );
+
+    if let Some(enabled) = enabled {
+        let toggle = dispatch.clone();
+        actions = actions.child(
+            Button::new("toggle-source")
+                .ghost()
+                .xsmall()
+                .label(if enabled { "暂停" } else { "恢复" })
+                .on_click(move |_, window, cx| {
+                    toggle(
+                        Action::Worker(Command::SetSourceEnabled {
+                            source_id: id,
+                            enabled: !enabled,
+                        }),
+                        window,
+                        cx,
+                    );
+                }),
+        );
+    }
+
+    let edit = dispatch.clone();
+    actions = actions.child(
+        Button::new("edit-source")
+            .ghost()
+            .xsmall()
+            .icon(Icon::new(PhosphorIcon::GearSix.regular()))
+            .tooltip("信息源设置")
+            .on_click(move |_, window, cx| {
+                edit(Action::EditSource(id), window, cx);
+            }),
+    );
+
+    let remove = dispatch.clone();
+    actions = actions.child(
+        Button::new("remove-source")
+            .ghost()
+            .xsmall()
+            .label("移除")
+            .on_click(move |_, window, cx| {
+                remove(Action::RemoveSource(id), window, cx);
+            }),
+    );
+
+    actions.into_any_element()
 }
 
 /// The headline layout, virtualised.
@@ -621,6 +626,19 @@ fn article_row(
                 .when(!entry.read, |this| this.bg(cx.theme().accent))
                 .when(entry.read, |this| this.bg(gpui_kit::transparent_black())),
         )
+        .when_some(entry.icon.as_deref(), |this, url| {
+            // The row's mark: the item's own, or its source's, or its
+            // plugin's. Nothing is drawn when all three are silent — a generic
+            // glyph on every headline would be decoration, and the row already
+            // has a source name under the title.
+            this.child(super::picture::icon(
+                Some(url),
+                px(20.),
+                cx.theme().radius,
+                PhosphorIcon::Article.regular(),
+                cx,
+            ))
+        })
         .child(
             v_flex()
                 .min_w_0()
@@ -663,195 +681,6 @@ fn article_row(
         .into_any_element()
 }
 
-/// How many tiles fit across the middle column.
-///
-/// Fixed, not measured. The middle column is a fixed 340px wide (see
-/// `app::RomeApp`), so the number that fits never changes and a measured grid
-/// would spend a layout pass per frame deciding the same thing. The cheap
-/// responsive alternative — a wrapped flex row — was tried and rejected: with
-/// growing tiles the last row's single tile stretches to the full width, which
-/// is a worse failure than a fixed count. If the pane is ever made resizable,
-/// this is the thing to revisit.
-const COLUMNS: usize = 3;
-
-/// How tall a tile's picture is, and how tall one grid row is.
-///
-/// Stated rather than derived, and the arithmetic is worth writing down because
-/// every number in it comes from somewhere else:
-///
-/// ```text
-///   middle column        340   (app::RomeApp)
-///   row padding px_2     -16
-///   two gaps of gap_2    -16
-///   ─────────────────────────
-///   tile width            308 / 3 = 102.67
-///   tile padding p_1p5   -12
-///   ─────────────────────────
-///   picture width          90.67, drawn 90 tall
-///
-///   row py_1             8
-///   tile p_1p5          12
-///   picture             90
-///   tile gap_1           4
-///   title line          16
-///   ─────────────────────────
-///   row height         130
-/// ```
-///
-/// The alternative is `aspect_square`, which reads better until the list
-/// measures it: `uniform_list` gives every item the height of the first one it
-/// lays out, and a square whose height comes from its width resolves against
-/// whatever width that measuring pass happened to offer. The grid then comes
-/// out at a row pitch of the pane's width — 324 pixels of picture per row,
-/// with a 90-pixel picture in it. A number that cannot disagree with itself is
-/// worth the arithmetic.
-const TILE: Pixels = px(90.);
-const ROW: Pixels = px(130.);
-
-/// The picture layout: what the entries carry as their image, in a grid.
-///
-/// Virtualised by row, because a row is the unit that repeats. A tile is a
-/// square whose height comes from its width, and the title under it is one
-/// truncated line, so every row is exactly as tall as every other — which is
-/// the condition `uniform_list` needs, and the reason this can be a list at all
-/// rather than a `div` holding every tile at once. A thousand pictures should
-/// cost a screenful of elements, not a thousand.
-///
-/// Entries without an image are drawn as a muted tile rather than filtered out.
-/// Dropping them was the old behaviour and it lied: the header counted N entries
-/// and the grid showed fewer, so a feed that mostly carries links looked empty.
-/// A tile that says it has no picture is honest and stays clickable, which is
-/// what an entry is for.
-fn pictures(entries: &[EntryRow], snapshot: &Snapshot, dispatch: &Dispatch) -> AnyElement {
-    let open = snapshot.open.as_ref().map(|detail| detail.id);
-
-    // Owned rather than borrowed: the list's render closure outlives this call
-    // and runs on later frames. The same copy `articles` makes, and just as
-    // cheap — headlines and image URLs, not the images.
-    let rows: Rc<Vec<Vec<EntryRow>>> =
-        Rc::new(entries.chunks(COLUMNS).map(<[EntryRow]>::to_vec).collect());
-    let count = rows.len();
-
-    let cell_rows = rows.clone();
-    let cell_dispatch = dispatch.clone();
-
-    // No empty case of its own: `column` sends an empty list to the empty
-    // state before it gets here, which is the only place that knows whether
-    // "nothing" means no source, no fetch, or no match.
-    uniform_list("pictures", count, move |range, _, cx| {
-        range
-            .map(|index| {
-                let row = &cell_rows[index];
-                let mut tiles = h_flex().w_full().h(ROW).gap_2().px_2().py_1();
-
-                for column in 0..COLUMNS {
-                    tiles = match row.get(column) {
-                        Some(entry) => tiles.child(picture_cell(
-                            entry,
-                            open == Some(entry.id),
-                            &cell_dispatch,
-                            cx,
-                        )),
-                        // A last row that is not full still holds every slot.
-                        // Letting it hold fewer would let its tiles grow to
-                        // fill the row, and they would come out a different
-                        // size from every other tile in the grid.
-                        None => tiles.child(div().flex_1().min_w(px(0.))),
-                    };
-                }
-
-                tiles.into_any_element()
-            })
-            .collect()
-    })
-    .flex_1()
-    .min_h_0()
-    .into_any_element()
-}
-
-/// One picture, as a tile.
-fn picture_cell(entry: &EntryRow, selected: bool, dispatch: &Dispatch, cx: &App) -> AnyElement {
-    let dispatch = dispatch.clone();
-    let id = entry.id;
-
-    let media = match &entry.image {
-        Some(image) => div()
-            .w_full()
-            .h(TILE)
-            .flex_shrink_0()
-            .rounded_sm()
-            .overflow_hidden()
-            .bg(cx.theme().muted)
-            .child(picture::tile(image.clone(), cx))
-            .into_any_element(),
-        // See the note on `pictures`: an entry with no image is still an
-        // entry, and a tile that says so is the honest way to keep it
-        // reachable.
-        None => div()
-            .w_full()
-            .h(TILE)
-            .flex_shrink_0()
-            .rounded_sm()
-            .overflow_hidden()
-            .bg(cx.theme().muted)
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .child(
-                Icon::new(PhosphorIcon::ImageBroken.regular())
-                    .size_4()
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("没有图片"),
-            )
-            .into_any_element(),
-    };
-
-    v_flex()
-        .id(format!("picture:{id}"))
-        // One of the row's equal shares. `min_w(0)` as well, because a tile
-        // whose title is one long unbroken word would otherwise refuse to
-        // shrink below it and push its neighbours out of the column.
-        .flex_1()
-        .min_w(px(0.))
-        .gap_1()
-        .p_1p5()
-        .rounded_md()
-        .cursor_pointer()
-        .bg(cx.theme().secondary.opacity(0.4))
-        .when(selected, |this| this.bg(cx.theme().accent.opacity(0.18)))
-        .hover(|this| this.bg(cx.theme().accent.opacity(0.08)))
-        .on_click(move |_, window, cx| {
-            dispatch(Action::Worker(Command::Open(Some(id))), window, cx);
-        })
-        .child(media)
-        .child(
-            // `min_w(0)` as well as `truncate`: a flex item's minimum width is
-            // its min-content width by default, and for a line that cannot
-            // wrap that is the whole headline — so without this the title sets
-            // the tile's floor, refuses to shrink, and spills out over the
-            // tile beside it.
-            div()
-                .min_w(px(0.))
-                .text_xs()
-                .line_height(px(16.))
-                .truncate()
-                .text_color(if entry.read {
-                    cx.theme().muted_foreground
-                } else {
-                    cx.theme().foreground
-                })
-                .child(entry.title.clone()),
-        )
-        .into_any_element()
-}
-
 /// Why the middle column is empty, said in terms of what the user can do.
 fn empty_state(snapshot: &Snapshot, cx: &App) -> AnyElement {
     if let Some(query) = &snapshot.search {
@@ -868,7 +697,7 @@ fn empty_state(snapshot: &Snapshot, cx: &App) -> AnyElement {
         return placeholder(
             PhosphorIcon::Rss.regular(),
             "还没有信息源",
-            "在左边点「添加信息源」装上第一个插件，它抓到的条目会出现在这里",
+            "在左边点「添加信息源」，从市场里挑一个插件，装上后添加订阅",
             None,
             cx,
         );

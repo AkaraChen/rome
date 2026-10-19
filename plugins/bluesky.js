@@ -17,6 +17,7 @@ export const meta = {
   apiVersion: '1',
   view: 'socialMedia',
   description: '任意 Bluesky 账号的公开动态时间线',
+  icon: 'https://bsky.app/favicon.ico',
 }
 
 export const settings = {

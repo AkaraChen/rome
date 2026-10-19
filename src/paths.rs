@@ -66,27 +66,26 @@ pub fn plugin_code_path(database: &Path, plugin_id: u64) -> io::Result<PathBuf> 
     Ok(dir.join(format!("{plugin_id}.js")))
 }
 
-/// Directory inside the data directory that holds the example plugins.
-const BUNDLED_DIR: &str = "examples";
+/// Directory inside the data directory that holds the bundled plugins' copies.
+const BUNDLED_DIR: &str = "bundled";
 
-/// Where one of the built-in example plugins is written, and the file created
-/// with it.
+/// Where one of the built-in plugins is written, and the file created with it.
 ///
-/// An example has no file of its own — it is compiled into the binary — but
-/// everything downstream of the install dialog works in paths, and rightly so:
-/// describing a plugin means running it, and the runtime loads a plugin from a
-/// file. Writing the example out is what lets it take the same road a plugin
-/// from disk takes, rather than a second road that would then have to be kept
-/// in step with the first.
+/// A bundled plugin has no file of its own — it is compiled into the binary —
+/// but everything downstream of the install confirmation works in paths, and
+/// rightly so: describing a plugin means running it, and the runtime loads a
+/// plugin from a file. Writing the plugin out is what lets it take the same
+/// road a plugin from disk takes, rather than a second road that would then
+/// have to be kept in step with the first.
 ///
 /// Beside the database rather than in the temporary directory, so a run pointed
 /// at a scratch database keeps everything it derives in that scratch place —
-/// and so the path the install dialog shows is one the reader can open
+/// and so the path the install confirmation shows is one the reader can open
 /// afterwards to read the plugin they just installed.
 ///
 /// Written on every call. It is the app's own copy of a file the app shipped,
 /// so there is nothing a user could have edited here that is worth keeping, and
-/// a copy that was left alone would be an example that no longer matches the
+/// a copy that was left alone would be a plugin that no longer matches the
 /// source it was built from.
 pub fn write_bundled_plugin(slug: &str, code: &str) -> io::Result<PathBuf> {
     let dir = data_dir().join(BUNDLED_DIR);

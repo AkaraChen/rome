@@ -16,6 +16,7 @@ export const meta = {
   apiVersion: '1',
   view: 'pictures',
   description: '必应首页每日壁纸，含最近数天',
+  icon: 'https://www.bing.com/favicon.ico',
 }
 
 export const settings = {

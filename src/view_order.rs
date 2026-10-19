@@ -131,14 +131,7 @@ mod tests {
 
         assert_eq!(
             names(&resolve(Some(&stored))),
-            [
-                "pictures",
-                "articles",
-                "social",
-                "videos",
-                "audios",
-                "notifications"
-            ]
+            ["pictures", "articles", "social", "videos", "audios"]
         );
     }
 
@@ -155,7 +148,7 @@ mod tests {
         assert_eq!(order[0], View::Pictures);
         assert_eq!(
             &names(&order)[1..],
-            ["articles", "social", "videos", "audios", "notifications"]
+            ["articles", "social", "videos", "audios"]
         );
     }
 
@@ -196,10 +189,9 @@ mod tests {
     fn a_round_trip_through_the_stored_form_is_lossless() {
         let order = vec![
             View::Pictures,
-            View::Notifications,
+            View::Audios,
             View::Articles,
             View::Videos,
-            View::Audios,
             View::SocialMedia,
         ];
 
@@ -222,9 +214,9 @@ mod tests {
         let order = resolve(None);
 
         assert_eq!(moved(&order, View::Articles, -1), order);
-        assert_eq!(moved(&order, View::Notifications, 1), order);
+        assert_eq!(moved(&order, View::Audios, 1), order);
         // Not even a wrap: the last row asked to go down stays where it is.
-        assert_eq!(moved(&order, View::Notifications, 2), order);
+        assert_eq!(moved(&order, View::Audios, 2), order);
     }
 
     #[test]

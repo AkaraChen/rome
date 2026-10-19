@@ -53,6 +53,9 @@ pub struct SourceRow {
     pub id: u64,
     pub plugin_id: u64,
     pub title: String,
+    /// The source's icon, already resolved: its own if the plugin declared one
+    /// for this subscription, otherwise the plugin's.
+    pub icon: Option<String>,
     pub view: View,
     /// Which group it is filed under, if any.
     pub category: Option<String>,
@@ -87,6 +90,8 @@ pub struct PluginRow {
     pub name: String,
     pub version: String,
     pub description: Option<String>,
+    /// The icon the plugin's manifest declared.
+    pub icon: Option<String>,
     pub enabled: bool,
     /// How many sources are subscribed to it.
     pub sources: usize,
@@ -140,6 +145,9 @@ pub struct EntryRow {
     pub published_at: Option<i64>,
     pub summary: Option<String>,
     pub image: Option<String>,
+    /// The row's icon, already resolved through the fallback chain: the item's
+    /// own, then its source's, then the plugin's.
+    pub icon: Option<String>,
     pub read: bool,
     pub starred: bool,
 }
@@ -190,9 +198,39 @@ pub struct EntryDetail {
     /// needs to know which URL is the one drawing the banner so it does not
     /// draw it twice.
     pub image: Option<String>,
+    /// The reading pane's icon, resolved the same way an entry row's is.
+    pub icon: Option<String>,
     pub source_title: String,
     pub read: bool,
     pub starred: bool,
+}
+
+impl EntryDetail {
+    /// The HTML the entry's body should be drawn from.
+    ///
+    /// Three sources, in order of how much they are the entry rather than a
+    /// note about it. The plugin's own page for the item is the best thing the
+    /// app can have: it was made by the code that listed the item, from the
+    /// item's own parameters, and it is the only source that knows what the
+    /// item *is*. What the plugin said in the list comes next. The summary is
+    /// what is left — for an aggregator that is a score and a comment count,
+    /// which is not a body at all but is better than an empty pane, which would
+    /// look like a bug.
+    ///
+    /// Here rather than in the reading pane because the picture view's detail
+    /// overlay draws the same text, and two answers to "what is this entry's
+    /// body" would eventually disagree.
+    pub fn body_html(&self) -> &str {
+        if let Body::Read(page) = &self.preview {
+            return page;
+        }
+
+        self.content
+            .as_deref()
+            .filter(|content| !content.trim().is_empty())
+            .or(self.summary.as_deref())
+            .unwrap_or_default()
+    }
 }
 
 /// Everything the UI draws.

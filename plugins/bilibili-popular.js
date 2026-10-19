@@ -20,6 +20,7 @@ export const meta = {
   apiVersion: '1',
   view: 'videos',
   description: '哔哩哔哩综合热门视频榜，逐页向后抓取，打开后可看详情',
+  icon: 'https://www.bilibili.com/favicon.ico',
 }
 
 export const settings = {
