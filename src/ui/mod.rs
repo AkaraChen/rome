@@ -59,6 +59,12 @@ pub enum Action {
     OpenPluginMarket,
     /// Switch between the add-source page's two tabs.
     SwitchAddSource(wizard::Tab),
+    /// Show the next page of bundled plugins in the market.
+    ///
+    /// The market holds hundreds of plugins. Drawing all of them at once would
+    /// ask for every favicon on the page and lay out a grid taller than anyone
+    /// will scroll, so it draws a page at a time.
+    ShowMoreMarket,
     /// Install a bundled plugin by slug, leaving the source for later.
     InstallBundled(String),
     /// Open a plugin file and install it, leaving the source for later.

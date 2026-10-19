@@ -37,8 +37,8 @@ export const meta = {
     id: "hacker-news",          // required, stable, unique across all plugins
     name: "Hacker News",        // required, shown in the UI
     version: "1.0.0",           // required, your plugin's own version
-    apiVersion: 1,              // required, the host interface you were written against
-    view: "articles",           // required, one of the six below
+    apiVersion: "1",           // required, the host interface you were written against
+    view: "articles",           // required, one of the five below
     description: "…",           // optional, one line for the plugin list
     icon: "https://…"           // optional, absolute URL
 };
@@ -57,11 +57,50 @@ your plugin the UI hard-codes:
 | `videos` | video entries |
 | `audios` | audio entries |
 | `socialMedia` | short posts from a timeline |
-| `notifications` | things that happened, not things to read |
 
 `apiVersion` is the interface version, not your plugin version. Declare the one you were
 written against; the host refuses versions it does not provide, so an old plugin never breaks
 silently when the interface moves.
+
+### `meta.params` — what one source needs
+
+A plugin that needs an argument declares the form once, in its manifest, and the host draws
+it when a source is created:
+
+```js
+export const meta = {
+    id: "hacker-news",
+    // …
+    params: {
+        fields: [
+            {
+                key: "feed",
+                type: "select",
+                label: "栏目",
+                default: "top",
+                help: "读取哪一个列表",
+                options: [
+                    { value: "top", label: "热门" },
+                    { value: "new", label: "最新" },
+                ],
+            },
+            { key: "query", type: "text", label: "关键词", default: "" },
+        ],
+    },
+};
+```
+
+`type` is one of `text`, `password`, `number`, `textarea`, `checkbox` and `select`; an unknown
+type is drawn as text. `options` entries are strings or `{ value, label }`. `default`, `help`
+and `placeholder` are optional.
+
+The values arrive as `ctx.params`, one object per source, so the same plugin can back many
+sources with different answers. Read every field defensively — `ctx.params?.feed` — because a
+source can outlive a version of the plugin that renamed a field.
+
+Keep upstream argument names when a plugin is a port. A route parameter called `year-from`
+stays `ctx.params['year-from']`; renaming it would make the form and the site disagree about
+what the argument is called.
 
 ### `fetch(ctx)` — required
 
@@ -791,8 +830,8 @@ thing to do: it is exactly what a browser would follow.
 ### A note on `params`
 
 `ctx.params` is how one plugin backs several sources — `{ feed: "new" }` and `{ feed: "best" }`
-are two sources over one module. Where params come from is up to the host's UI; your job is to
-read them defensively, as the HN plugin does with `ctx.params.feed`.
+are two sources over one module. The form that collects them is [`meta.params`](#metaparams--what-one-source-needs);
+your job is to read them defensively, as the HN plugin does with `ctx.params.feed`.
 
 ---
 

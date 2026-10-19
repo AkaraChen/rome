@@ -14,6 +14,7 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
 use serde_json::{Value, json};
@@ -58,6 +59,14 @@ pub struct RomeApp {
     /// conversation with the user, and the worker has no business knowing about
     /// a name it has not been given yet.
     add_source: wizard::State,
+    /// The market's filter box, once the tab has been opened.
+    ///
+    /// Built on first use because an [`InputState`] needs a window, and the
+    /// window's own constructor does not have one yet. The subscription is held
+    /// for the same reason it exists at all: the grid is drawn from the box's
+    /// value, so every keystroke has to redraw the page.
+    market_search: Option<Entity<InputState>>,
+    _market_search_events: Option<Subscription>,
     /// Whether the sidebar is narrowed to its icons.
     ///
     /// Window state, not snapshot state: the worker has nothing to do with it
@@ -74,6 +83,8 @@ impl RomeApp {
             snapshot: Snapshot::default(),
             mode: Mode::Browse,
             add_source: wizard::State::default(),
+            market_search: None,
+            _market_search_events: None,
             sidebar_collapsed: false,
         }
     }
@@ -102,9 +113,51 @@ impl RomeApp {
     }
 
     /// Show the add-source page on `tab`, at its first step.
-    pub fn open_add_source(&mut self, tab: wizard::Tab) {
+    ///
+    /// Takes a window and a context because the market's filter box is an
+    /// input, and the first time the market is opened that box has to be
+    /// created and watched.
+    pub fn open_add_source(
+        &mut self,
+        tab: wizard::Tab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.mode = Mode::AddSource;
         self.add_source = wizard::State::at(tab);
+
+        if tab != wizard::Tab::Market {
+            return;
+        }
+
+        let search = match self.market_search.clone() {
+            Some(search) => search,
+            None => {
+                let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索插件"));
+                self._market_search_events = Some(cx.observe(&search, |_, _, cx| cx.notify()));
+                self.market_search = Some(search.clone());
+                search
+            }
+        };
+
+        // A query is about the visit that typed it. The tab was just reset, so
+        // the box is too, or a reader who came back to install something else
+        // would find the market filtered by a word they no longer remember.
+        search.update(cx, |state, cx| state.set_value("", window, cx));
+    }
+
+    /// Type a query into the market's filter box.
+    ///
+    /// The box is filled by typing, and a frame cannot type. This is the same
+    /// kind of seam as [`RomeApp::set_sidebar_collapsed`]: a way for a test to
+    /// reach a state the window owns, so that the page the reader sees after a
+    /// keystroke can be looked at rather than reasoned about.
+    pub fn set_market_search(&self, query: &str, window: &mut Window, cx: &mut App) {
+        let Some(search) = self.market_search.as_ref() else {
+            return;
+        };
+
+        search.update(cx, |state, cx| state.set_value(query, window, cx));
     }
 
     /// Go to the configure step for one installed plugin.
@@ -183,12 +236,12 @@ impl RomeApp {
             }
 
             Action::OpenAddSource => {
-                self.open_add_source(wizard::Tab::Installed);
+                self.open_add_source(wizard::Tab::Installed, window, cx);
                 cx.notify();
             }
 
             Action::OpenPluginMarket => {
-                self.open_add_source(wizard::Tab::Market);
+                self.open_add_source(wizard::Tab::Market, window, cx);
                 cx.notify();
             }
 
@@ -197,7 +250,12 @@ impl RomeApp {
                 // about a plugin on the other tab, and coming back to it after
                 // browsing the market would present a decision the reader has
                 // already walked away from.
-                self.open_add_source(tab);
+                self.open_add_source(tab, window, cx);
+                cx.notify();
+            }
+
+            Action::ShowMoreMarket => {
+                self.add_source.show_more_market();
                 cx.notify();
             }
 
@@ -470,9 +528,14 @@ impl Render for RomeApp {
             ),
             // The add-source page is edge to edge, like the feeds: it is not a
             // filter over entries and there is nothing to read beside it.
-            (Mode::AddSource, _) => {
-                wizard::pane(&self.snapshot, &self.add_source, &dispatch, available, cx)
-            }
+            (Mode::AddSource, _) => wizard::pane(
+                &self.snapshot,
+                &self.add_source,
+                self.market_search.as_ref(),
+                &dispatch,
+                available,
+                cx,
+            ),
             // The four browsed views take the whole width. Their shape is the
             // content's, not a list's: a timeline, a grid of covers, a podcast
             // home. There is no reading pane because there is nothing in them

@@ -18,6 +18,15 @@ migrate *args:
 shots *args:
     ROME_SHOT_DIR=shots cargo test --test render -- {{args}}
 
+# Check every bundled plugin's manifest, and rewrite the table the market draws from.
+plugins:
+    node tools/plugins.mjs check
+    node tools/plugins.mjs generate
+
+# Only check, for a plugin that was just edited and should not be regenerated yet.
+plugins-check:
+    node tools/plugins.mjs check
+
 
 # `just --list` shows the last comment line above a recipe, so the notes below
 # live down here rather than above the recipes they describe.

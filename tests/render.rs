@@ -636,16 +636,29 @@ fn shoot(name: &str, frame: Frame, snapshot: Snapshot, look: Look) -> bool {
 
                 // The screens are window state rather than snapshot state, so a
                 // frame that needs one has to ask for it here, before the
-                // entity exists.
+                // entity exists. Two of them build an input, which needs the
+                // app's own context rather than the test's.
+                let app = cx.new(|_| app);
+
                 match look.screen {
                     Screen::Browse => {}
-                    Screen::Plugins => app.set_mode(Mode::Plugins),
-                    Screen::AddSource => app.open_add_source(AddSourceTab::Installed),
-                    Screen::AddSourceMarket => app.open_add_source(AddSourceTab::Market),
-                    Screen::AddSourceConfigure(plugin) => app.configure_source(plugin, window, cx),
+                    Screen::Plugins => app.update(cx, |app, _| app.set_mode(Mode::Plugins)),
+                    Screen::AddSource => app.update(cx, |app, cx| {
+                        app.open_add_source(AddSourceTab::Installed, window, cx);
+                    }),
+                    Screen::AddSourceMarket => app.update(cx, |app, cx| {
+                        app.open_add_source(AddSourceTab::Market, window, cx);
+                    }),
+                    Screen::AddSourceMarketFilter(query) => app.update(cx, |app, cx| {
+                        app.open_add_source(AddSourceTab::Market, window, cx);
+                        app.set_market_search(query, window, cx);
+                    }),
+                    Screen::AddSourceConfigure(plugin) => app.update(cx, |app, cx| {
+                        app.configure_source(plugin, window, cx);
+                    }),
                 }
 
-                cx.new(|_| app)
+                app
             },
         )
     });
@@ -793,6 +806,12 @@ enum Screen {
     Plugins,
     AddSource,
     AddSourceMarket,
+    /// The market with something typed into its filter box.
+    ///
+    /// A filter that matches nothing draws a line of its own instead of a grid,
+    /// and that line is only reachable by typing — a fixture has no way to say
+    /// it, which is the same reason the dialogs are listed here.
+    AddSourceMarketFilter(&'static str),
     AddSourceConfigure(u64),
 }
 
@@ -838,6 +857,18 @@ impl Look {
     /// The page's other tab: the built-in market.
     const ADD_SOURCE_MARKET: Self = Self {
         screen: Screen::AddSourceMarket,
+        ..Self::LIGHT
+    };
+    /// The market filtered down to a word that matches, where the count has to
+    /// change and the grid has to be shorter than the catalogue.
+    const ADD_SOURCE_MARKET_FILTERED: Self = Self {
+        screen: Screen::AddSourceMarketFilter("arxiv"),
+        ..Self::LIGHT
+    };
+    /// The market filtered down to nothing, which is the one state where the
+    /// tab draws no grid at all and has to say why.
+    const ADD_SOURCE_MARKET_EMPTY: Self = Self {
+        screen: Screen::AddSourceMarketFilter("zzzzzz"),
         ..Self::LIGHT
     };
     /// The second step, with the form the plugin asked for.
@@ -934,6 +965,21 @@ fn main() {
             COMPACT,
             fixture(),
             Look::ADD_SOURCE_MARKET,
+        ),
+        // The market's filter box, in both of its answers: a word that matches
+        // and a word that does not. The second is the frame that would
+        // otherwise ship as a blank page.
+        (
+            "add-source-market-filtered",
+            LAPTOP,
+            fixture(),
+            Look::ADD_SOURCE_MARKET_FILTERED,
+        ),
+        (
+            "add-source-market-empty",
+            LAPTOP,
+            fixture(),
+            Look::ADD_SOURCE_MARKET_EMPTY,
         ),
         // The page on a fresh install, where nothing is installed and the
         // market is the only way forward.

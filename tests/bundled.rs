@@ -1,12 +1,12 @@
 //! The plugins that are compiled into the binary.
 //!
-//! The table in `src/bundled.rs` restates four facts that live in the plugin
-//! sources themselves: the id each plugin declares, its name, its description
-//! and the view its sources start in. It has to — a market cannot be drawn by
-//! running seven plugins — so the risk is not the duplication but the drift.
-//! Renaming `plugins/hacker-news.js`, or changing the description inside it,
-//! would leave a market row that offers the wrong thing, and nothing else in
-//! the tree would notice.
+//! The table in `src/bundled/generated.rs` restates four facts that live in the
+//! plugin sources themselves: the id each plugin declares, its name, its
+//! description and the view its sources start in. It has to — a market cannot
+//! be drawn by running hundreds of plugins — so the risk is not the duplication
+//! but the drift. Renaming a file under `plugins/`, or changing the description
+//! inside it, would leave a market row that offers the wrong thing, and nothing
+//! else in the tree would notice.
 //!
 //! These tests are that notice. They read the same files through the same
 //! `include_str!` and assert the table agrees with them.
@@ -156,11 +156,6 @@ fn every_plugin_says_what_it_is_for() {
         assert!(
             !plugin.description.trim().is_empty(),
             "`{}` has nothing to say about itself",
-            plugin.slug
-        );
-        assert!(
-            !plugin.about.trim().is_empty(),
-            "`{}` has no note about the technique it demonstrates",
             plugin.slug
         );
         assert!(

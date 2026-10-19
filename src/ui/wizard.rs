@@ -62,6 +62,13 @@ const CARD_MIN: Pixels = px(240.);
 const CARD_GAP: Pixels = px(16.);
 const CARD_HEIGHT: Pixels = px(176.);
 
+/// How many market cards are drawn before 「显示更多」.
+///
+/// The card grid is built eagerly, and every card with an icon starts an
+/// image request. A page rather than the whole catalogue keeps both bounded
+/// while still filling the first screen many times over.
+const MARKET_PAGE: usize = 48;
+
 /// How many market cards fit across `inner`, never fewer than one.
 fn card_columns(inner: Pixels) -> usize {
     let inner = f32::from(inner);
@@ -117,6 +124,11 @@ pub enum Step {
 pub struct State {
     pub tab: Tab,
     pub step: Step,
+    /// How many market cards are currently drawn.
+    ///
+    /// Window state for the same reason as the tab: it is where the reader got
+    /// to in a list, not a fact about their subscriptions.
+    market_visible: usize,
 }
 
 impl Default for State {
@@ -124,6 +136,7 @@ impl Default for State {
         Self {
             tab: Tab::Installed,
             step: Step::Choose,
+            market_visible: MARKET_PAGE,
         }
     }
 }
@@ -135,6 +148,14 @@ impl State {
             tab,
             ..Self::default()
         }
+    }
+
+    /// Draw the next page of the market.
+    pub fn show_more_market(&mut self) {
+        self.market_visible = self
+            .market_visible
+            .saturating_add(MARKET_PAGE)
+            .min(crate::bundled::ALL.len());
     }
 
     /// Build the configure step for `plugin`.
@@ -163,6 +184,7 @@ impl State {
                 title,
                 params,
             },
+            ..Self::default()
         }
     }
 
@@ -186,9 +208,14 @@ impl State {
 /// reason the feeds take it: the market's column count is part of the layout,
 /// and a grid whose cards decide their own width cannot also keep its rows
 /// aligned.
+///
+/// `search` is the market's filter box. It belongs to the window rather than to
+/// this page's state because it is an entity, and it is only drawn on the tab
+/// that has a catalogue long enough to need one.
 pub fn pane(
     snapshot: &Snapshot,
     state: &State,
+    search: Option<&Entity<InputState>>,
     dispatch: &Dispatch,
     available: Pixels,
     cx: &App,
@@ -198,7 +225,7 @@ pub fn pane(
 
     let body = match state.tab {
         Tab::Installed => installed_tab(inner, snapshot, state, dispatch, cx),
-        Tab::Market => market_tab(inner, snapshot, dispatch, cx),
+        Tab::Market => market_tab(inner, snapshot, state, search, dispatch, cx),
     };
 
     v_flex()
@@ -668,23 +695,78 @@ fn configure(
 
 /// The market, as a grid of cards.
 ///
-/// A market is browsed rather than read: the reader is comparing seven things
-/// they have never seen, and a row of text makes that comparison a reading
-/// exercise. Cards put the mark, the name and the one line the plugin says
-/// about itself in the same place on every item, so the eye can move down a
-/// column instead of across a sentence.
-fn market_tab(inner: Pixels, snapshot: &Snapshot, dispatch: &Dispatch, cx: &App) -> AnyElement {
+/// A market is browsed rather than read: the reader is comparing plugins they
+/// have never seen, and a row of text makes that comparison a reading exercise.
+/// Cards put the mark, the name and the one line the plugin says about itself
+/// in the same place on every item, so the eye can move down a column instead
+/// of across a sentence.
+///
+/// The catalogue is far longer than a screen and longer than a person will
+/// scroll, so the tab has two things a short list does not need: a filter, and
+/// a page at a time. The count is the point of the footer — without it
+/// 「显示更多」 is a button with no end.
+fn market_tab(
+    inner: Pixels,
+    snapshot: &Snapshot,
+    state: &State,
+    search: Option<&Entity<InputState>>,
+    dispatch: &Dispatch,
+    cx: &App,
+) -> AnyElement {
     let count = card_columns(inner);
     let width = card_width(inner, count);
+    let all = crate::bundled::ALL;
+    let query = search
+        .map(|search| search.read(cx).value().trim().to_lowercase())
+        .unwrap_or_default();
+
+    let matches: Vec<&crate::bundled::Bundled> = all
+        .iter()
+        .filter(|bundled| market_matches(bundled, &query))
+        .collect();
+
+    let visible = state.market_visible.clamp(count, matches.len().max(count));
+    let shown = &matches[..visible.min(matches.len())];
 
     let mut grid = v_flex().w_full().gap_4();
 
-    for row in crate::bundled::ALL.chunks(count) {
+    for row in shown.chunks(count) {
         grid = grid.child(
             h_flex().w_full().items_stretch().gap_4().children(
                 row.iter()
                     .map(|bundled| market_card(bundled, width, snapshot, dispatch, cx)),
             ),
+        );
+    }
+
+    let mut page = v_flex().w_full().gap_4().child(grid);
+
+    if shown.len() < matches.len() {
+        let more = dispatch.clone();
+
+        page = page.child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(crate::theme::LABEL))
+                        .line_height(px(18.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("已显示 {} / {} 个插件", shown.len(), matches.len())),
+                )
+                .child(
+                    Button::new("add-source-market-more")
+                        .small()
+                        .label("显示更多")
+                        .on_click(move |_, window, cx| {
+                            more(Action::ShowMoreMarket, window, cx);
+                        }),
+                ),
         );
     }
 
@@ -714,8 +796,68 @@ fn market_tab(inner: Pixels, snapshot: &Snapshot, dispatch: &Dispatch, cx: &App)
                         .child("编译在 Rome 里；装好后到「已安装」里添加信息源"),
                 ),
         )
-        .child(grid)
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(240.))
+                        .flex_shrink_0()
+                        .children(search.map(|search| {
+                            Input::new(search)
+                                .bordered(true)
+                                .cleanable(true)
+                                .into_any_element()
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(crate::theme::LABEL))
+                        .line_height(px(18.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(if query.is_empty() {
+                            format!("共 {} 个插件", all.len())
+                        } else {
+                            format!("匹配 {} 个", matches.len())
+                        }),
+                ),
+        )
+        .child(if matches.is_empty() {
+            // A filter that matches nothing has to say so. An empty grid is
+            // indistinguishable from a market that failed to load.
+            div()
+                .w_full()
+                .py_8()
+                .text_size(px(crate::theme::LABEL))
+                .line_height(px(18.))
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("没有匹配「{query}」的插件"))
+                .into_any_element()
+        } else {
+            page.into_any_element()
+        })
         .into_any_element()
+}
+
+/// Whether `bundled` is what `query` is looking for.
+///
+/// The name and the description are what the card shows, so they are what the
+/// reader can search by; the slug is in there too because it carries the site
+/// and the command — `zhihu`, `bbc` — which is how someone who knows where a
+/// plugin came from would look for it.
+fn market_matches(bundled: &crate::bundled::Bundled, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+
+    bundled.name.to_lowercase().contains(query)
+        || bundled.description.to_lowercase().contains(query)
+        || bundled.slug.contains(query)
 }
 
 /// One bundled plugin, as a card.
@@ -782,8 +924,8 @@ fn market_card(
                         .gap_3()
                         .items_center()
                         // The plugin's own mark, which its manifest declares.
-                        // The glyph is for the two computed plugins that read
-                        // other plugins' output and have no site of their own.
+                        // The glyph stands in when a manifest has none, and
+                        // while the picture is still on its way.
                         .child(super::picture::icon(
                             bundled.icon,
                             px(40.),
